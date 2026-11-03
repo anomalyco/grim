@@ -15,8 +15,8 @@ const { startServer } = await import("../../src/server/index.ts");
 let app: Awaited<ReturnType<typeof startServer>>;
 let base = "";
 const WS = "instructions-notes";
-const NOTE_RULE = (p: string) => `${p} has instructions you haven't read (or they changed since you read it). Read ${p} again, then redo your edit.`;
-const MD_CHANGED = "This workspace's AGENTS.md changed since you read it. Read AGENTS.md again, then redo your command.";
+const NOTE_RULE = (p: string) => `${p} has instructions you haven't read (or they changed since you read it). Run: instructions ${p} — then redo your edit.`;
+const MD_CHANGED = "This workspace's AGENTS.md changed since you read it. Run: instructions — then redo your command.";
 
 beforeAll(async () => {
   app = await startServer({ port: 0, quiet: true });
@@ -82,6 +82,17 @@ describe("writes need the latest instructions", () => {
     expect(await text("plan.md")).toEndWith("log:\none\n");
   });
 
+  test("(b) the instructions built-in prints just the block (labelled per file) and counts as reading it", async () => {
+    expect((await run("ses_b2", "echo two >> plan.md")).stderr).toContain(NOTE_RULE("plan.md"));
+    const out = await run("ses_b2", "instructions plan.md README.md");
+    expect(out.stdout).toBe("[instructions in plan.md]\nOnly append.\n[end of instructions in plan.md]\n\nREADME.md has no instructions.\n");
+    expect((await run("ses_b2", "echo two >> plan.md")).exitCode).toBe(0);
+    const missing = await run("ses_b2", "instructions nope.md");
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toContain("nope.md: no such file");
+    expect((await run("ses_b2", "instructions")).stdout).toBe("This workspace has no AGENTS.md.\n");
+  });
+
   test("(h) any read counts: head -n 1 (not even the block), grep without a match", async () => {
     expect((await run("ses_h", "head -n 1 plan.md")).stdout).toBe("# Plan\n");
     expect((await run("ses_h", "echo h >> plan.md")).exitCode).toBe(0);
@@ -96,7 +107,7 @@ describe("writes need the latest instructions", () => {
   test("(c) a person changes the block: refused until read again (live edits too)", async () => {
     await setNote("plan.md", "# Plan\n\n```instructions\nWrite in French.\n```\n\nlog:\n");
     expect((await run("ses_b", "echo two >> plan.md")).stderr).toContain(NOTE_RULE("plan.md"));
-    await run("ses_b", "cat plan.md");
+    expect((await run("ses_b", "instructions plan.md")).stdout).toContain("Write in French.");
     expect((await run("ses_b", "echo deux >> plan.md")).exitCode).toBe(0);
     // a restore lands in the live text first
     const history = (await human("GET", "history?path=plan.md")) as { sha: string }[];
@@ -131,11 +142,19 @@ describe("writes need the latest instructions", () => {
     expect(out.agents_md).toBe("# Rules\nBe kind.");
     expect(out.stderr).toContain(MD_CHANGED);
     expect((await run("ses_d", "echo d2 >> fresh.md")).exitCode).toBe(0);
+    // `instructions` (no argument) prints AGENTS.md and counts as reading it
+    await setNote("AGENTS.md", "# Rules\nBe gentle.\n");
+    expect((await run("ses_d2", "true")).agents_md).toBe("# Rules\nBe gentle.");
+    await setNote("AGENTS.md", "# Rules\nBe exact.\n");
+    const md = await run("ses_d2", "instructions");
+    expect(md.stdout).toEndWith("[AGENTS.md]\n# Rules\nBe exact.\n[end of AGENTS.md]\n");
+    expect((await run("ses_d2", "echo d3 >> fresh.md")).exitCode).toBe(0);
   });
 
   test("(e) creating a note needs only AGENTS.md; reading AGENTS.md directly counts", async () => {
     await setNote("AGENTS.md", "# Rules\nBe quick.\n");
     expect((await run("ses_d", "echo '# N' > n.md")).stderr).toContain(MD_CHANGED);
+    expect((await run("ses_d", "instructions AGENTS.md")).stdout).toBe("[AGENTS.md]\n# Rules\nBe quick.\n[end of AGENTS.md]\n");
     await setNote("AGENTS.md", "# Rules\nBe calm.\n");
     // (delivered above: then changed again) a read of the file counts
     await run("ses_d", "cat AGENTS.md");

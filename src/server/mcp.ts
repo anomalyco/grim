@@ -47,7 +47,7 @@ Tools:
 
 Pass your agent session's ID as \`session_id\` and its title as \`session_name\` on every \`command\` call (e.g. your OpenCode session \`ses_…\` and its title): people see which session wrote each line, by its title. How writes and calls behave, Grim's own commands and the limits are in \`command\`'s description.
 
-Each workspace may have an AGENTS.md with rules for working in it; you're shown it on your first command there and again whenever it changes. Notes may start with an \`\`\`instructions block. Writes are refused until you've read the latest AGENTS.md and the latest instructions of the note you're editing: read the file and retry. What you've read is remembered per \`session_id\`, so pass the same one on every call.`;
+Each workspace may have an AGENTS.md with rules for working in it; you're shown it on your first command there and again whenever it changes. Notes may start with an \`\`\`instructions block. Writes are refused until you've read the latest AGENTS.md and the latest instructions of the note you're editing: run \`instructions <note>\` (or \`instructions\` for AGENTS.md) in \`command\`, or read the file, and retry. What you've read is remembered per \`session_id\`, so pass the same one on every call.`;
 }
 
 const COMMAND_DESCRIPTION = `Run a bash script in one Grim workspace, in a sandboxed shell whose filesystem is the workspace's live Markdown notes, starting in ${WORKSPACE}/<workspace>.

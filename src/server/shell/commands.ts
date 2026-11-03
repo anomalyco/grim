@@ -1,10 +1,12 @@
-// Grim shell commands: save, who, watch, changes, repos, git (read-only history), and stubs for what isn't here.
+// Grim shell commands: save, who, watch, changes, instructions, repos, git (read-only history), and stubs for what isn't here.
 import { formatChanges } from "../changes.ts";
 import { posix } from "node:path";
 import { defineCommand, type Command, type ExecResult } from "just-bash";
 import type { RepoRow } from "../repos.ts";
 import { isMarkdown, type CommitSummary } from "../store/types.ts";
 import { isNotePath, WORKSPACE, workspacePath, type NotesFs } from "./fs.ts";
+import { AGENTS_MD } from "../agents-md.ts";
+import { instructionsOf } from "../../shared/instructions.ts";
 
 export interface CommandHost {
   fs: NotesFs;
@@ -295,6 +297,40 @@ export function grimoireCommands(host: CommandHost): Command[] {
       const t = await resolveTarget(host, cwd, rest[0], { mustExist: false });
       const r = await workspace(host, t.repo).changes(t.repo, t.path);
       return ok(formatChanges(r, { stat, path: t.path ? relTo(cwd, t.repo.id, t.path) : undefined }));
+    }),
+
+    // `instructions [note…]`: just each note's top ```instructions block (no argument: the workspace's AGENTS.md),
+    // marked read for the session like any read of the file (server/instructions.ts), so its next writes pass
+    command("instructions", host, async (args, cwd) => {
+      const paths = args.filter((a) => a !== "--");
+      if (paths.some((a) => a.startsWith("-"))) throw new UsageError("usage: instructions [note…] (no argument: the workspace's AGENTS.md)");
+      const out: string[] = [];
+      const errors: string[] = [];
+      for (const arg of paths.length ? paths : [null]) {
+        let t: Target;
+        try {
+          t = arg === null ? await resolveTarget(host, cwd, undefined, { mustExist: false }) : await resolveTarget(host, cwd, arg);
+        } catch (e) {
+          errors.push(`instructions: ${e instanceof Error ? e.message : String(e)}`);
+          continue;
+        }
+        const path = arg === null ? AGENTS_MD : t.path;
+        const label = arg ?? AGENTS_MD;
+        if (arg !== null && t.kind !== "file") {
+          errors.push(`instructions: ${arg}: not a note`);
+          continue;
+        }
+        const text = await fs.readInstructions(t.repo, path);
+        if (path === AGENTS_MD) {
+          if (text === null || !text.trim()) out.push(`This workspace has no ${AGENTS_MD}.\n`);
+          else out.push(`[${label}]\n${text.replace(/\s+$/, "")}\n[end of ${label}]\n`);
+          continue;
+        }
+        const body = text === null ? null : instructionsOf(text);
+        out.push(body === null ? `${label} has no instructions.\n` : `[instructions in ${label}]\n${body}\n[end of instructions in ${label}]\n`);
+      }
+      const r = ok(out.join("\n"));
+      return errors.length ? { ...r, stderr: errors.join("\n") + "\n", exitCode: 1 } : r;
     }),
 
     command("who", host, async (args, cwd) => {

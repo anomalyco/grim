@@ -238,6 +238,16 @@ export class NotesFs implements IFileSystem {
     return this.seenKey ? { guard: this.seenKey } : {};
   }
 
+  /**
+   * The `instructions` command's read of a note (or AGENTS.md): its text as people see it now (not this command's
+   * unapplied writes), remembered as read like any read; null when it doesn't exist.
+   */
+  async readInstructions(repo: RepoRow, path: string): Promise<string | null> {
+    const t = await this.liveText(repo, path);
+    if (t !== null) this.noteRead(repo, path, t);
+    return t;
+  }
+
   /** Remember that this command read `path`'s text (any read counts, even one that doesn't show the block). */
   private noteRead(repo: RepoRow, path: string, text: string) {
     if (!this.seenKey) return;
