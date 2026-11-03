@@ -246,7 +246,7 @@ export function agentPrompt(url: string, token: string | null, noSignIn: boolean
     : noSignIn
       ? ""
       : "Without a token you can only edit existing notes: not create, rename or delete them.\n";
-  return `Work in this Grim workspace: ${url}\nUse plain HTTP (e.g. curl). GET that URL for instructions, then POST shell commands to it to read and edit its Markdown notes.\n${auth}Also send X-Agent-Session-Id: <your session id> if you have one.`;
+  return `Work in this Grim workspace: ${url}\nUse plain HTTP (e.g. curl). GET that URL for instructions, then POST shell commands to it to read and edit its Markdown notes.\n${auth}Also send X-Agent-Session-Id: <your session id> and X-Agent-Session-Name: <your session title> if you have them.`;
 }
 
 /** A button that copies `text()` and says "Copied" for a moment; a promise (a token being made) says "Copying…" meanwhile. */
