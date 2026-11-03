@@ -15,7 +15,8 @@ import { AuthorGutter } from "./authors.ts";
 import { sigOf, toRLine, type RLine } from "./lineview.ts";
 import { applyLineReveal, collectImages, renderRLine, type CodeHl, type ImagePool, type RLineDiv } from "./render.ts";
 import { CodeHighlight, type CodeHost } from "./code.ts";
-import { blockClip, blockRoom, dropStrays, groupBlocks, isBlock, lineDivOf, lineDivs, placeAfter, scrollBlockTo } from "./blocks.ts";
+import { blockClip, blockRoom, dropStrays, groupBlocks, INSTR_BLOCK, isBlock, lineDivOf, lineDivs, placeAfter, scrollBlockTo } from "./blocks.ts";
+import { instructionsBlockAt } from "../../shared/instructions.ts";
 import { applyEdits } from "./edits.ts";
 import { DomLayout, scrollBy, scrollToEdge, visibleBounds } from "./layout.ts";
 import { attachRustInput } from "./input.ts";
@@ -243,6 +244,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     if (this.domStale && !this.composing) this.reconcile();
     const len = this.doc.text.length;
     this.sel = { anchor: clamp(p.sel.anchor, len), head: clamp(p.sel.head, len) };
+    this.markInstructions();
     this.code.update();
     if (!this.composing) this.writeDomSel();
     if (p.scroll === "caret") this.scrollCaretIntoView();
@@ -380,6 +382,19 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     if (divs.length === this.lines.length) groupBlocks(this.root, this.lines, divs);
   }
 
+  /** The note's top ```instructions block (shared/instructions.ts) is shown as a callout: its block gets INSTR_BLOCK. */
+  private markInstructions(): void {
+    const kids = lineDivs(this.root);
+    let want: Element | null = null;
+    if (kids.length === this.lines.length && this.doc.lines.length === this.lines.length) {
+      const b = instructionsBlockAt(this.lines.length, (i) => this.doc.text.slice(this.doc.lines[i]!.from, this.doc.lines[i]!.to));
+      const p = b && this.lines[b.open]?.type === "fence" && this.lines[b.open]?.code?.first ? kids[b.open]!.parentNode : null;
+      if (p && isBlock(this.root, p)) want = p;
+    }
+    for (const el of Array.from(this.root.getElementsByClassName(INSTR_BLOCK))) if (el !== want) el.classList.remove(INSTR_BLOCK);
+    want?.classList.add(INSTR_BLOCK);
+  }
+
   /** Recompute absolute line spans; false if they don't add up to the text. */
   private updateSpans(): boolean {
     const spans: LineSpan[] = new Array(this.lines.length);
@@ -488,6 +503,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.domStale = true;
     if (this.composing) return;
     this.reconcile();
+    this.markInstructions();
     this.code.update();
     this.writeDomSel();
   }

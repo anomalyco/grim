@@ -85,7 +85,7 @@ describe("AGENTS.md", () => {
     const second = await post({ command: "echo hi", session_id: "ses_c" });
     expect(second.agents_md).toBeUndefined();
     expect(second.stdout).toBe("hi\n");
-    // GET doesn't mark it seen, and ?format=text puts it before the output
+    // GET marks it seen only for its own reader (no session id here: address and name), and ?format=text puts it before the output
     expect(await post({ command: "echo hi", session_id: "ses_d" }, { text: true })).toBe(`${START}\n# Rules\nBe nice.\n[end of AGENTS.md]\n\nhi\n`);
     expect(await post({ command: "echo hi", session_id: "ses_d" }, { text: true })).toBe("hi\n");
   });
@@ -122,7 +122,7 @@ describe("AGENTS.md", () => {
     expect((await tool("command", { workspace: WS, command: "echo hi" }, other)).content[0].text).toContain(START);
   });
 
-  test("(g) workspace_info returns it (and doesn't mark it seen); list_workspaces says has_agents_md", async () => {
+  test("(g) workspace_info returns it (marked seen for its connection, or its session_id, only); list_workspaces says has_agents_md", async () => {
     const info = await tool("workspace_info", { workspace: WS });
     expect(info.structuredContent).toMatchObject({ id: WS, access: "write", kind: "notes", agents_md: "# Rules\nBe brief." });
     expect(info.content[0].text).toContain("## AGENTS.md\n\n# Rules\nBe brief.");

@@ -108,8 +108,9 @@ export interface WorkspaceApi {
   patchFile(repo: RepoRow, path: string, base: string, next: string, actor: Participant): Promise<FileWrite>;
   appendText(repo: RepoRow, path: string, text: string, actor: Participant): Promise<FileWrite>;
   restoreFile(repo: RepoRow, path: string, sha: string, actor: Participant): Promise<{ path: string }>;
-  deleteFile(repo: RepoRow, path: string, actor: Participant): Promise<{ ok: true }>;
-  renameFile(repo: RepoRow, from: string, to: string, actor: Participant, opts?: { ifUntitled?: boolean }): Promise<{ path: string }>;
+  /** `guard`: an agent session's key, whose write is refused (428) until it read the latest instructions (instructions.ts). */
+  deleteFile(repo: RepoRow, path: string, actor: Participant, opts?: { guard?: string }): Promise<{ ok: true }>;
+  renameFile(repo: RepoRow, from: string, to: string, actor: Participant, opts?: { ifUntitled?: boolean; guard?: string }): Promise<{ path: string }>;
   renameFolder(repo: RepoRow, from: string, to: string, actor: Participant): Promise<{ path: string }>;
   deleteFolder(repo: RepoRow, dir: string, actor: Participant): Promise<{ ok: true }>;
   uploadImage(repo: RepoRow, notePath: string, filename: string, bytes: Uint8Array, actor: Participant): Promise<ImageUpload>;
@@ -118,7 +119,7 @@ export interface WorkspaceApi {
   /** The artifact files at the branch tip, with sizes. */
   artifacts(repo: RepoRow): Promise<FileMeta[]>;
   /** Artifact writes and deletes in one commit (checked: types, sizes, executables, the workspace's total). */
-  writeArtifacts(repo: RepoRow, changes: ArtifactChange[], actor: Participant): Promise<{ commit: string | null; written: string[]; deleted: string[] }>;
+  writeArtifacts(repo: RepoRow, changes: ArtifactChange[], actor: Participant, opts?: { guard?: string }): Promise<{ commit: string | null; written: string[]; deleted: string[] }>;
   /**
    * The shell's view in one call: the head listing, open notes' live text and cached committed text, only what
    * changed since `since` (a version from an earlier snapshot). `want`: committed files to read too, in that order,
@@ -127,9 +128,10 @@ export interface WorkspaceApi {
   snapshot(repo: RepoRow, since: string | null, want?: string[]): Promise<ShellSnapshot>;
   /**
    * The shell's writes of one command, in order (create, append at the live end, or a 3-way merge of base → content
-   * into the live text). One result per write: null when applied, else the error message.
+   * into the live text). One result per write: null when applied, else the error message. `guard`: the agent
+   * session's key; a write it may not make yet (instructions.ts) fails on its own, the others still apply.
    */
-  applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant): Promise<(string | null)[]>;
+  applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant, opts?: { guard?: string }): Promise<(string | null)[]>;
   /**
    * Shell `save`: commit these notes now, then the open notes under each folder of `dirs` ("" is the whole workspace).
    * One result per note, in that order: `saved` false when it had nothing unsaved; `commit` its base commit after.
@@ -145,9 +147,12 @@ export interface WorkspaceApi {
   changes(repo: RepoRow, path?: string): Promise<ChangesResult>;
   /**
    * The root's AGENTS.md as committed at the head (file: null when there is none). With `session` (agents-md.ts
-   * urlSessionKey / mcpSessionKey), `unseen` says whether that session hadn't been shown this version, and marks it seen.
+   * urlSessionKey / mcpSessionKey), `unseen` says whether that session hadn't been shown this version, and marks it seen
+   * (`onlyNew`: only if it had seen none; else `stale`).
    */
-  agentsMd(repo: RepoRow, session?: string | null): Promise<AgentsMdFor>;
+  agentsMd(repo: RepoRow, session?: string | null, opts?: { onlyNew?: boolean }): Promise<AgentsMdFor>;
+  /** An agent session read these files (`version`: instructions.ts readVersion of the text it read). */
+  markRead(repo: RepoRow, session: string, reads: { path: string; version: string }[]): Promise<void>;
   /** Markdown files at the branch tip, plus open notes that aren't committed yet. */
   tree(repo: RepoRow): Promise<string[]>;
   head(repo: RepoRow): Promise<string | null>;

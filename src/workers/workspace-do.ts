@@ -54,7 +54,7 @@ import { demoLobby, newDemoStore, openDemo, resetDemoWorkspace } from "./demo.ts
 import { DEMO_REPORT_MS, isDemoRoom } from "../server/demo-rooms.ts";
 import type { Env } from "./index.ts";
 import { DoRoomStorage } from "./room-storage-do.ts";
-import { MAX_SEEN, SEEN_TTL_MS, type SeenStore } from "../server/agents-md.ts";
+import { AGENTS_MD, MAX_SEEN, SEEN_TTL_MS, type SeenStore } from "../server/agents-md.ts";
 import { gitStore, inRequestScope, readAdmission, type Admission } from "./router.ts";
 import { StoreCalls, Timing } from "./timing.ts";
 
@@ -161,7 +161,13 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     this.#storage.exec("CREATE TABLE IF NOT EXISTS workspace_meta (k TEXT PRIMARY KEY, v TEXT)");
     this.#storage.exec("CREATE TABLE IF NOT EXISTS presence_files (path TEXT PRIMARY KEY)");
     this.#storage.exec("CREATE TABLE IF NOT EXISTS channel_paths (hash TEXT PRIMARY KEY, path TEXT NOT NULL)");
-    this.#storage.exec("CREATE TABLE IF NOT EXISTS agents_md_seen (session TEXT PRIMARY KEY, version TEXT NOT NULL, at INTEGER NOT NULL)");
+    this.#storage.exec("CREATE TABLE IF NOT EXISTS instructions_seen (session TEXT NOT NULL, path TEXT NOT NULL, version TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (session, path))");
+    this.#storage.exec("CREATE INDEX IF NOT EXISTS instructions_seen_at ON instructions_seen (at)");
+    // (AGENTS.md alone, before notes' instructions blocks were tracked too)
+    if (this.#storage.exec<{ n: number }>("SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'agents_md_seen'")[0]?.n) {
+      this.#storage.exec("INSERT OR IGNORE INTO instructions_seen (session, path, version, at) SELECT session, 'AGENTS.md', version, at FROM agents_md_seen");
+      this.#storage.exec("DROP TABLE agents_md_seen");
+    }
     // its repos writes (head, import status) empty this isolate's workspace-row cache
     const db = (this.#db = repoCacheDb(d1Db(env.DB)));
     const demo = (this.#demo = isDemoRoom(this.#id));
@@ -791,20 +797,20 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
     return this.#branch;
   }
 
-  /** Which agent sessions saw which version of AGENTS.md: a day each, the newest MAX_SEEN. */
+  /** Which agent sessions saw which version of AGENTS.md and of notes' instructions blocks: a day each, the newest MAX_SEEN. */
   #seenStore(): SeenStore {
     const storage = this.#storage;
     let writes = 0;
     return {
-      get(session) {
-        const row = storage.exec<{ version: string; at: number }>("SELECT version, at FROM agents_md_seen WHERE session = ?", session)[0];
+      get(session, path = AGENTS_MD) {
+        const row = storage.exec<{ version: string; at: number }>("SELECT version, at FROM instructions_seen WHERE session = ? AND path = ?", session, path)[0];
         return row && Date.now() - row.at <= SEEN_TTL_MS ? row.version : null;
       },
-      put(session, version) {
-        storage.exec("INSERT INTO agents_md_seen (session, version, at) VALUES (?, ?, ?) ON CONFLICT (session) DO UPDATE SET version = excluded.version, at = excluded.at", session, version, Date.now());
+      put(session, version, path = AGENTS_MD) {
+        storage.exec("INSERT INTO instructions_seen (session, path, version, at) VALUES (?, ?, ?, ?) ON CONFLICT (session, path) DO UPDATE SET version = excluded.version, at = excluded.at", session, path, version, Date.now());
         if (++writes % 100 !== 1) return;
-        storage.exec("DELETE FROM agents_md_seen WHERE at < ?", Date.now() - SEEN_TTL_MS);
-        storage.exec("DELETE FROM agents_md_seen WHERE session IN (SELECT session FROM agents_md_seen ORDER BY at DESC LIMIT -1 OFFSET ?)", MAX_SEEN);
+        storage.exec("DELETE FROM instructions_seen WHERE at < ?", Date.now() - SEEN_TTL_MS);
+        storage.exec("DELETE FROM instructions_seen WHERE at < (SELECT at FROM instructions_seen ORDER BY at DESC LIMIT 1 OFFSET ?)", MAX_SEEN);
       },
     };
   }
@@ -842,10 +848,10 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   restoreFile(repo: RepoRow, path: string, sha: string, actor: Participant) {
     return this.#call(repo, (rt) => rt.restoreFile(repo, path, sha, actor));
   }
-  deleteFile(repo: RepoRow, path: string, actor: Participant) {
-    return this.#call(repo, (rt) => rt.deleteFile(repo, path, actor));
+  deleteFile(repo: RepoRow, path: string, actor: Participant, opts?: { guard?: string }) {
+    return this.#call(repo, (rt) => rt.deleteFile(repo, path, actor, opts));
   }
-  renameFile(repo: RepoRow, from: string, to: string, actor: Participant, opts?: { ifUntitled?: boolean }) {
+  renameFile(repo: RepoRow, from: string, to: string, actor: Participant, opts?: { ifUntitled?: boolean; guard?: string }) {
     return this.#call(repo, (rt) => rt.renameFile(repo, from, to, actor, opts));
   }
   renameFolder(repo: RepoRow, from: string, to: string, actor: Participant) {
@@ -863,8 +869,8 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   artifacts(repo: RepoRow) {
     return this.#call(repo, (rt) => rt.artifacts(repo));
   }
-  writeArtifacts(repo: RepoRow, changes: ArtifactChange[], actor: Participant) {
-    return this.#call(repo, (rt) => rt.writeArtifacts(repo, changes, actor));
+  writeArtifacts(repo: RepoRow, changes: ArtifactChange[], actor: Participant, opts?: { guard?: string }) {
+    return this.#call(repo, (rt) => rt.writeArtifacts(repo, changes, actor, opts));
   }
   tree(repo: RepoRow) {
     return this.#call(repo, (rt) => rt.tree(repo));
@@ -881,8 +887,8 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   snapshot(repo: RepoRow, since: string | null, want?: string[]) {
     return this.#call(repo, (rt) => rt.snapshot(repo, since, want));
   }
-  applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant) {
-    return this.#call(repo, (rt) => rt.applyWrites(repo, writes, actor));
+  applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant, opts?: { guard?: string }) {
+    return this.#call(repo, (rt) => rt.applyWrites(repo, writes, actor, opts));
   }
   save(repo: RepoRow, paths: string[], dirs?: string[]) {
     return this.#call(repo, (rt) => rt.save(repo, paths, dirs));
@@ -900,8 +906,11 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   changes(repo: RepoRow, path?: string) {
     return this.#call(repo, (rt) => rt.changes(repo, path));
   }
-  agentsMd(repo: RepoRow, session?: string | null) {
-    return this.#call(repo, (rt) => rt.agentsMd(repo, session));
+  agentsMd(repo: RepoRow, session?: string | null, opts?: { onlyNew?: boolean }) {
+    return this.#call(repo, (rt) => rt.agentsMd(repo, session, opts));
+  }
+  markRead(repo: RepoRow, session: string, reads: { path: string; version: string }[]) {
+    return this.#call(repo, (rt) => rt.markRead(repo, session, reads));
   }
   search(repo: RepoRow, q: string) {
     return this.#call(repo, (rt) => rt.search(repo, q));

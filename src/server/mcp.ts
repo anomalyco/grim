@@ -47,7 +47,7 @@ Tools:
 
 Pass your agent session's ID as \`session_id\` and its title as \`session_name\` on every \`command\` call (e.g. your OpenCode session \`ses_…\` and its title): people see which session wrote each line, by its title. How writes and calls behave, Grim's own commands and the limits are in \`command\`'s description.
 
-Each workspace may have an AGENTS.md with rules for working in it; you're shown it on your first command there and again whenever it changes.`;
+Each workspace may have an AGENTS.md with rules for working in it; you're shown it on your first command there and again whenever it changes. Notes may start with an \`\`\`instructions block. Writes are refused until you've read the latest AGENTS.md and the latest instructions of the note you're editing: read the file and retry. What you've read is remembered per \`session_id\`, so pass the same one on every call.`;
 }
 
 const COMMAND_DESCRIPTION = `Run a bash script in one Grim workspace, in a sandboxed shell whose filesystem is the workspace's live Markdown notes, starting in ${WORKSPACE}/<workspace>.
@@ -75,6 +75,7 @@ const TOOLS = [
       type: "object",
       properties: {
         workspace: { type: "string", description: "The workspace id (from list_workspaces, or the part after /app/ in a workspace link).", minLength: 1 },
+        session_id: { type: "string", description: "Optional: your agent session's ID, as for `command` (the AGENTS.md shown counts as read by it)." },
       },
       required: ["workspace"],
       additionalProperties: false,
@@ -201,9 +202,12 @@ async function command(params: Record<string, unknown>, c: CallCtx) {
   if (cwd === null) return text(noFolder(directory), true);
   const actor: Participant = participantForAgent({ id: actorId, name: c.conn.name, session: sessionId, sessionName });
   try {
-    const run = shells.exec(actor, access, params.command, { timeoutMs: timeout * 1000, signal: c.signal, home, cwd, directory, limitKey: actorId });
-    const out = formatResult(await run);
-    return text((await unseenAgentsMd(c, repo, sessionId)) + out);
+    // AGENTS.md before the output, as unseenAgentsMd; a changed one counts as read only from the next command (agent-url.ts)
+    const seenKey = mcpSessionKey({ sessionId, userId, connection: c.conn.id });
+    const md = await agentsMdFor(ctx, repo, seenKey, { onlyNew: true });
+    const out = formatResult(await shells.exec(actor, access, params.command, { timeoutMs: timeout * 1000, signal: c.signal, home, cwd, directory, limitKey: actorId, seenKey }));
+    if (md.stale) await agentsMdFor(ctx, repo, seenKey);
+    return text((md.unseen && md.file ? agentsMdBlock(md.file) : "") + out);
   } catch (e) {
     if (!isErr(e, "NoFolderError")) console.error("[mcp] command:", e);
     return text(e instanceof Error ? e.message : String(e), true);
@@ -233,11 +237,13 @@ async function unseenAgentsMd(c: CallCtx, repo: RepoRow, sessionId: string | und
 }
 
 async function workspaceInfo(params: Record<string, unknown>, c: CallCtx) {
-  for (const k of Object.keys(params)) if (k !== "workspace") return text(`unknown argument: ${k} (expected workspace)`, true);
+  for (const k of Object.keys(params)) if (!["workspace", "session_id"].includes(k)) return text(`unknown argument: ${k} (expected workspace, session_id)`, true);
   const w = await openWorkspace(params.workspace, c);
   if (!("repo" in w)) return w;
   const ctx = c.server.ctx;
-  const [files, md] = await Promise.all([ctx.repos.tree(w.repo).catch(() => null), agentsMdFor(ctx, w.repo, null)]);
+  // the AGENTS.md shown here counts as read by the session (instructions.ts)
+  const reader = mcpSessionKey({ sessionId: parseSession(params.session_id, undefined).sessionId, userId: c.caller.userId, connection: c.conn.id });
+  const [files, md] = await Promise.all([ctx.repos.tree(w.repo).catch(() => null), agentsMdFor(ctx, w.repo, reader)]);
   const info = {
     id: w.repo.id,
     title: w.repo.title,

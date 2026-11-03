@@ -12,6 +12,8 @@ import type { Ctx } from "./ops.ts";
 import { cleanPath } from "./repos.ts";
 import { isUnfurler } from "./share-meta.ts";
 import { underArtifacts } from "../shared/artifacts.ts";
+import { readerKey } from "./agent-url.ts";
+import { readVersion } from "./instructions.ts";
 
 /** The same URL answers HTML or Markdown: caches must key on Accept, and live text is never stored. */
 const NEGOTIATED = { vary: "Accept", "cache-control": "no-store", "x-content-type-options": "nosniff" };
@@ -54,8 +56,11 @@ function text(body: string, status = 200, type = "text/plain; charset=utf-8"): R
 
 const notFound = (what: string) => text(`Not found: ${what}\n`, 404);
 
-/** GET/HEAD of a note URL from a non-browser (see wantsApp). */
-export async function noteUrlResponse(url: URL, ctx: Ctx): Promise<Response> {
+/**
+ * GET/HEAD of a note URL from a non-browser (see wantsApp). A note with an instructions block (or AGENTS.md) counts as
+ * read by the caller's agent session (agent-url.ts readerKey; instructions.ts).
+ */
+export async function noteUrlResponse(req: Request, url: URL, ctx: Ctx): Promise<Response> {
   const m = NOTE_URL.exec(url.pathname)!;
   let id: string;
   let path: string;
@@ -91,7 +96,16 @@ export async function noteUrlResponse(url: URL, ctx: Ctx): Promise<Response> {
         if (errStatus(e) === 404) return null;
         throw e;
       });
-      if (read) return text(read.content, 200, "text/markdown; charset=utf-8");
+      if (read) {
+        const v = readVersion(read.path, read.content);
+        if (v !== null) {
+          await ctx.repos.host
+            .get(repo.id)
+            .markRead(repo, await readerKey(ctx.repos.db, req, url), [{ path: read.path, version: v }])
+            .catch((e: unknown) => console.error(`[note-url] mark read ${repo.id}:${read.path}:`, e));
+        }
+        return text(read.content, 200, "text/markdown; charset=utf-8");
+      }
     }
     // a folder (or the workspace's root): its notes, one path per line
     const prefix = path ? path.replace(/\/+$/, "") + "/" : "";

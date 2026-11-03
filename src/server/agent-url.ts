@@ -9,7 +9,7 @@ import { bearerToken, participantForAgent, repoAccess, userFromAppToken, type Ac
 import { getRepo, type RepoRow, type RepoService } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
 import { WORKSPACE, type AccessFn, type ShellCtx } from "./shell/fs.ts";
-import { formatResult, noFolder, parseShellRequest, resolveDirectory, type Shells } from "./shell/session.ts";
+import { formatResult, noFolder, parseSessionId, parseShellRequest, resolveDirectory, type Shells } from "./shell/session.ts";
 import { errStatus, isErr } from "./errors.ts";
 import { isDemoRoom } from "./demo-rooms.ts";
 import { DEMO_ID } from "./demo.ts";
@@ -19,6 +19,7 @@ import { workspaceAccess } from "./workspaces.ts";
 import { metric } from "./metrics.ts";
 import { agentsMdBlock, urlSessionKey, type AgentsMdFor } from "./agents-md.ts";
 import { MAX_ARTIFACT_BYTES, MAX_ARTIFACTS_TOTAL_BYTES } from "../shared/artifacts.ts";
+import { INSTRUCTIONS_RULE } from "./instructions.ts";
 
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_NAME = "Agent";
@@ -39,13 +40,26 @@ export interface AgentCaller {
 }
 
 /** The workspace's AGENTS.md for an agent session (agents-md.ts); never fails a call (on an error: none). */
-export async function agentsMdFor(ctx: Pick<AgentCtx, "repos">, repo: RepoRow, session: string | null): Promise<AgentsMdFor> {
+export async function agentsMdFor(ctx: Pick<AgentCtx, "repos">, repo: RepoRow, session: string | null, opts?: { onlyNew?: boolean }): Promise<AgentsMdFor> {
   try {
-    return await ctx.repos.host.get(repo.id).agentsMd(repo, session);
+    return await ctx.repos.host.get(repo.id).agentsMd(repo, session, opts);
   } catch (e) {
     console.error(`[agent] AGENTS.md of ${repo.id}:`, e);
     return { file: null, unseen: false };
   }
+}
+
+/**
+ * The session key a GET from an agent (the workspace's instructions, a note) counts its read under: its session_id
+ * (?session_id= or X-Agent-Session-Id), else what its POSTs would be keyed by (its account by a bearer token, else
+ * its address, plus X-Agent-Name).
+ */
+export async function readerKey(db: Db, req: Request, url: URL): Promise<string> {
+  const sessionId = parseSessionId(url.searchParams.get("session_id") ?? req.headers.get("x-agent-session-id") ?? undefined);
+  const name = cleanLabel(req.headers.get("x-agent-name")) ?? DEFAULT_NAME;
+  const token = !sessionId && config.signIn ? bearerToken(req) : null;
+  const userId = token ? ((await userFromAppToken(db, token, MCP_AUDIENCE).catch(() => null))?.id ?? null) : null;
+  return urlSessionKey({ sessionId, userId, ip: clientIp(req), name });
 }
 
 /** What guests are told to do for more than editing. */
@@ -179,7 +193,7 @@ export async function handleAgentGet(req: Request, url: URL, ctx: AgentCtx): Pro
   }
   const accept = req.headers.get("accept") ?? "";
   const markdown = accept.includes("text/markdown") && !accept.includes("text/plain");
-  const body = await instructionsFor(ctx, repo!);
+  const body = await instructionsFor(ctx, repo!, await readerKey(ctx.repos.db, req, url));
   return text(req.method === "HEAD" ? "" : body, 200, markdown ? { "content-type": "text/markdown; charset=utf-8" } : {});
 }
 
@@ -287,16 +301,20 @@ export async function handleAgentPost(req: Request, url: URL, ctx: AgentCtx, she
     // One agent per name and workspace (and account), and agent session if it says: its cursor, presence and commits.
     const actor = participantForAgent({ id: `agent:${caller.userId ?? "guest"}:${r0.id}:${name.toLowerCase()}`, name, session: r.sessionId, sessionName: r.sessionName });
     running.set(key, (running.get(key) ?? 0) + 1);
+    const seenKey = urlSessionKey({ sessionId: r.sessionId, userId: caller.userId, ip: caller.ip, name });
+    // AGENTS.md: shown before the output the first time this session is shown this version (instructions.ts: a
+    // session's first sight counts as read for this command's writes; a changed one only from the next command)
+    let md: AgentsMdFor;
     let out;
     try {
-      out = await shells.exec(actor, access, r.command, { timeoutMs: r.timeoutMs, signal: req.signal, home, cwd, directory: r.directory, limitKey: key });
+      md = await agentsMdFor(ctx, r0, seenKey, { onlyNew: true });
+      out = await shells.exec(actor, access, r.command, { timeoutMs: r.timeoutMs, signal: req.signal, home, cwd, directory: r.directory, limitKey: key, seenKey });
+      if (md.stale) await agentsMdFor(ctx, r0, seenKey);
     } finally {
       const n = (running.get(key) ?? 1) - 1;
       if (n > 0) running.set(key, n);
       else running.delete(key);
     }
-    // AGENTS.md: the first time this session is shown this version, before the output
-    const md = await agentsMdFor(ctx, r0, urlSessionKey({ sessionId: r.sessionId, userId: caller.userId, ip: caller.ip, name }));
     const block = md.unseen && md.file ? agentsMdBlock(md.file) : "";
     if (wantsText(req, url)) return text(block + formatResult(out).replace(/\n?$/, "\n"), 200, { "x-exit-code": String(out.exitCode), "x-cwd": encodeURI(out.cwd) });
     return jsonRes({ stdout: block + out.stdout, stderr: out.stderr, exitCode: out.exitCode, cwd: out.cwd, truncated: !!out.truncated, ...(block ? { agents_md: md.file!.text } : {}) });
@@ -312,10 +330,11 @@ export async function handleAgentPost(req: Request, url: URL, ctx: AgentCtx, she
 
 const MAX_LISTED = 500;
 
-async function instructionsFor(ctx: AgentCtx, repo: RepoRow): Promise<string> {
+/** The workspace URL's instructions; they end with its AGENTS.md, which counts as read by `reader` (readerKey). */
+async function instructionsFor(ctx: AgentCtx, repo: RepoRow, reader: string | null): Promise<string> {
   const url = `${config.publicUrl}/app/${encodeURIComponent(repo.id)}`;
   const root = `${WORKSPACE}/${repo.id}`;
-  const [files, md] = await Promise.all([ctx.repos.tree(repo).catch(() => [] as string[]), agentsMdFor(ctx, repo, null)]);
+  const [files, md] = await Promise.all([ctx.repos.tree(repo).catch(() => [] as string[]), agentsMdFor(ctx, repo, reader)]);
   const writable = repoAccess(repo) === "write";
   const editOnly = writable && config.signIn && !guestCreate(repo.id);
   const sample = files.find((f) => /^[\w.-]+$/.test(f)) ?? files.find((f) => /^[\w./-]+$/.test(f)) ?? "note.md";
@@ -342,7 +361,7 @@ curl -s -X POST -H 'X-Agent-Name: <your name>' -H 'content-type: application/jso
 
 - JSON body: {"command": "...", "directory"?: "...", "session_id"?: "...", "session_name"?: "...", "timeout_seconds"?: N}. Any other body is the script itself.
 - X-Agent-Name labels your cursor and commits (default "${DEFAULT_NAME}"); send it on every call.${auth}
-- "session_id" (or X-Agent-Session-Id): your agent session's ID, e.g. your OpenCode session \`ses_…\`. People see which session wrote each line. Send it on every call.
+- "session_id" (or X-Agent-Session-Id): your agent session's ID, e.g. your OpenCode session \`ses_…\`. People see which session wrote each line, and what you've read is remembered under it (instructions: see How it works). Send it on every call, GETs included.
 - "session_name" (or X-Agent-Session-Name, URL-encoded): your agent session's title, shown next to what you write. Send it with "session_id" on every call.
 - "directory" (or X-Agent-Directory): the folder to start in, relative to the workspace root (default: the root).
 
@@ -353,10 +372,10 @@ curl -s -X POST -H 'X-Agent-Name: <your name>' -H 'content-type: application/jso
 - A session's first call, and its first after AGENTS.md changes, also carries the workspace's AGENTS.md (below, if it has one): in "agents_md" and before the output.
 
 ## Reading
-GET a note's URL for its Markdown, live edits included; a folder's URL lists its notes, one per line:
+GET a note's URL for its Markdown, live edits included (send your session id, so the read counts for your writes); a folder's URL lists its notes, one per line:
 
 \`\`\`bash
-curl -s '${url}/${samplePath}'
+curl -s -H 'X-Agent-Session-Id: ses_123' '${url}/${samplePath}'
 \`\`\`
 
 GET ${url}/changes (optionally ?path=) is the \`changes\` command as JSON: {"since": {"commit", "agent", "session"?, "at"} | null, "files": [{"path", "status", "from"?, "added", "removed", "diff"}], "truncated"}. (A note named changes.md is at ${url}/changes.md.)
@@ -379,6 +398,7 @@ export const AGENT_FACTS = `- Edits are live: people with the note open see them
 - Each call's writes are committed to Git right after it, on a commit of its own.
 - Each call starts fresh in the workspace's root (or \`directory\`): nothing (cd, variables, /tmp) carries over.
 - A write that fails with "changed by someone else" collided with someone's edit: read the file again and redo it.
+- ${INSTRUCTIONS_RULE}
 - Web artifacts: put HTML pages and their files (CSS, JS, images, JSON, fonts, media) under \`artifacts/\` at the workspace root (a folder per artifact, e.g. \`artifacts/report/index.html\`), and link them from notes with a relative link (\`[Report](artifacts/report/index.html)\`). Grim for Mac opens them in a side panel; the web app only lists them.
 - To ask for review (code changes, screenshots, choices), build the artifact with Grim's review kit, which the person can draw on and send back to your session (comments with file and line, and annotated images): \`artifacts/<name>/index.html\` with \`<script src="/_kit/review.js"></script>\` (served by Grim; copy nothing), then elements such as \`<grim-diff-stack src="changes.patch">\` (many diffs: a .diff/.patch file, or \`<grim-diff file="a.ts">\` with \`<script type="text/x-before">\`/\`text/x-after\`), \`<grim-images>\` with \`<img src alt>\` and \`<grim-compare before="old.png" after="new.png">\`, \`<grim-section heading>\`, \`<grim-note kind="question">\` (the reviewer answers it) and \`<grim-checklist><li>…</grim-checklist>\`. Link it from a note. Prefer it to plain Markdown whenever you want someone to review content.
 - Grim commands: \`changes [--stat] [path]\` (what people wrote by hand since the last agent commit, unsaved edits included: run it when you come back); \`watch [path] [--timeout S]\` (waits until someone else edits; the wait doesn't count toward the time limit); \`who <file>\` (who has it open); \`repos\` (the workspace and your access); \`git log|show|diff|status\` (read-only).`;

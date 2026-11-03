@@ -6,6 +6,8 @@
 import type { RLine } from "./lineview.ts";
 
 export const BLOCK = "mde-blk";
+/** The class of the code block that holds the note's instructions for agents (view.ts), drawn as a callout. */
+export const INSTR_BLOCK = "mde-blk-instr";
 
 /** Kept free between a wide block and the editor pane's edges (px). */
 export const SIDE_GAP = 24;

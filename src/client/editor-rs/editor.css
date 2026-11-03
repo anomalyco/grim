@@ -42,6 +42,12 @@
   --mde-bg: #fcfcfb;
   --mde-bg2: #ececee;
   --mde-code-bg: #f1f1f2;
+  --mde-instr-bg: #f4f7fa;
+  --mde-instr-border: #c8d5e1;
+  --mde-instr-label: #4f6a82;
+  --mde-instr-label-h: 30px;
+  --mde-instr-label-top: 12px;
+  --mde-instr-label-size: 11px;
   --mde-stroke: #d4d4d8;
   --mde-quote: #d4d4d8;
   --mde-selection: rgba(41, 109, 154, 0.18);
@@ -344,6 +350,22 @@
 .mde .ln-fence.rv { color: var(--mde-marker); }
 .mde .ln-fence .mk.fence { font-size: 0; }
 .mde .ln-fence.rv .mk.fence { font-size: 1em; color: var(--mde-marker); }
+
+/* The note's instructions for agents (its top ```instructions block, view.ts): a code block drawn as a callout, a
+   subtle bordered box with a small label where its collapsed opening fence is. Grim for Mac draws the same
+   (layout.rs/render.rs: INSTR_*). */
+.mde .mde-blk-code.mde-blk-instr { background: var(--mde-instr-bg); box-shadow: inset 0 0 0 1px var(--mde-instr-border); }
+.mde .mde-blk-instr .ln.in-code { background: transparent; }
+.mde .mde-blk-instr > .ln-fence.code-first:not(.rv) { height: var(--mde-instr-label-h); }
+.mde .mde-blk-instr > .ln-fence.code-first:not(.rv)::before {
+  content: "Instructions for agents";
+  display: block;
+  padding-top: var(--mde-instr-label-top);
+  font: 600 var(--mde-instr-label-size) / 1 var(--mde-ui-font);
+  letter-spacing: 0.02em;
+  color: var(--mde-instr-label);
+  white-space: nowrap;
+}
 
 /* tables (GFM): consecutive table-row lines form one anonymous table, so columns line up.
    Pipes, cell padding and the delimiter row are markers: collapsed unless the caret is in the table. */

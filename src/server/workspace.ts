@@ -19,6 +19,7 @@ import { AGENT_EMAIL, CHANGES_HISTORY, diffPaths, fileDiff, MAX_CHANGES_BYTES, t
 import type { AppEvent } from "./seams/events.ts";
 import { CLOSE, CODE, createWorkspaceSocket, WorkspaceSocketSet, type AdmittedSocket, type OpenErrorCode, type OpenRoomResult, type WorkspaceSocket } from "./wsmux.ts";
 import { AGENTS_MD, capAgentsMd, memorySeenStore, type AgentsMd, type AgentsMdFor, type SeenStore } from "./agents-md.ts";
+import { blockVersion, readVersion, unreadAgentsMd, unreadNote } from "./instructions.ts";
 import type { AdmittedWorkspace, ArtifactChange, DirtyNote, PresenceUser, SaveResult, ShellSnapshot, ShellWrite, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
 import { ARTIFACTS_DIR, artifactPathProblem, artifactType, looksExecutable, MAX_ARTIFACT_BYTES, MAX_ARTIFACT_FILES, MAX_ARTIFACTS_TOTAL_BYTES, underArtifacts } from "../shared/artifacts.ts";
 
@@ -131,7 +132,7 @@ export class WorkspaceRuntime implements WorkspaceApi {
     private store: HeadCachingStore,
     /** The rooms; only this workspace's are touched (Bun shares one RoomManager between runtimes, keyed by repo). */
     readonly rooms: RoomManager,
-    /** Which agent sessions saw which version of AGENTS.md (agents-md.ts). */
+    /** Which agent sessions saw which version of AGENTS.md and of notes' instructions blocks (agents-md.ts, instructions.ts). */
     private seen: SeenStore = memorySeenStore(),
   ) {}
 
@@ -273,9 +274,10 @@ export class WorkspaceRuntime implements WorkspaceApi {
    * must be an artifact type, at most MAX_ARTIFACT_BYTES, not an executable; the workspace's artifacts together stay
    * under MAX_ARTIFACTS_TOTAL_BYTES and MAX_ARTIFACT_FILES. Unchanged files aren't committed; nothing changed, no commit.
    */
-  async writeArtifacts(repo: RepoRow, changes: ArtifactChange[], actor: Participant): Promise<{ commit: string | null; written: string[]; deleted: string[] }> {
+  async writeArtifacts(repo: RepoRow, changes: ArtifactChange[], actor: Participant, opts: { guard?: string } = {}): Promise<{ commit: string | null; written: string[]; deleted: string[] }> {
     this.check(repo);
     writable(repo);
+    if (opts.guard) await this.checkRead(repo, opts.guard, null);
     const byPath = new Map<string, ArtifactChange>();
     for (const c of changes) {
       const clean = artifactClean(c.path);
@@ -454,10 +456,11 @@ export class WorkspaceRuntime implements WorkspaceApi {
     throw new OpError(409, "could not commit: the branch keeps moving");
   }
 
-  async deleteFile(repo: RepoRow, p: string, actor: Participant): Promise<{ ok: true }> {
+  async deleteFile(repo: RepoRow, p: string, actor: Participant, opts: { guard?: string } = {}): Promise<{ ok: true }> {
     this.check(repo);
     writable(repo);
     p = path(p);
+    if (opts.guard) await this.checkRead(repo, opts.guard, p);
     const open = this.rooms.peek(repo.id, p);
     const head = await this.store.head(repo.id, repo.branch);
     if (!head || (await this.store.readFile(repo.id, p, head)) === null) {
@@ -487,17 +490,19 @@ export class WorkspaceRuntime implements WorkspaceApi {
    * Rename a note (one commit). `ifUntitled` (a new note named after its heading): only while the note is still
    * untitled, so when two people trigger it at once the second one is refused (409/404).
    */
-  renameFile(repo: RepoRow, from: string, to: string, actor: Participant, opts: { ifUntitled?: boolean } = {}) {
+  renameFile(repo: RepoRow, from: string, to: string, actor: Participant, opts: { ifUntitled?: boolean; guard?: string } = {}) {
     this.check(repo);
     return this.queued(() => this.renameNow(repo, from, to, actor, opts));
   }
 
-  private async renameNow(repo: RepoRow, from: string, to: string, actor: Participant, opts: { ifUntitled?: boolean }) {
+  private async renameNow(repo: RepoRow, from: string, to: string, actor: Participant, opts: { ifUntitled?: boolean; guard?: string }) {
     writable(repo);
     from = path(from);
     to = path(to);
     if (opts.ifUntitled && !isUntitledPath(from)) throw new OpError(409, `${from} isn't untitled`);
     if (from === to) return { path: to };
+    // a write to the source (its instructions) and a new file at the target (AGENTS.md)
+    if (opts.guard) await this.checkRead(repo, opts.guard, from);
     if (await this.exists(repo, to)) throw new OpError(409, `${to} already exists`);
     const open = this.rooms.peek(repo.id, from);
     // Commit pending edits first, so they are attributed to their authors rather than to the rename.
@@ -509,6 +514,7 @@ export class WorkspaceRuntime implements WorkspaceApi {
     const changes = [...(atHead !== null ? [{ path: from, delete: true }] : []), { path: to, content }];
     await this.commitTreeChange(repo, changes, `Rename ${from} to ${to}`, actor);
     open?.closeWith("renamed", { to });
+    if (opts.guard) this.markWritten(opts.guard, to, content);
     await this.onPush(repo);
     return { path: to };
   }
@@ -592,7 +598,12 @@ export class WorkspaceRuntime implements WorkspaceApi {
     return pending.length ? [...new Set([...committed, ...pending])].sort() : committed;
   }
 
-  async agentsMd(repo: RepoRow, session?: string | null): Promise<AgentsMdFor> {
+  /**
+   * `onlyNew` (before an agent's command): mark the version seen only when the session had seen none, so its first
+   * command's writes pass; a session that saw an older one gets `stale` and is marked after the command (by a call
+   * without it), so writes it made without having seen the change are refused.
+   */
+  async agentsMd(repo: RepoRow, session?: string | null, opts: { onlyNew?: boolean } = {}): Promise<AgentsMdFor> {
     this.check(repo);
     const head = await this.store.head(repo.id, repo.branch);
     if (this.agentsMdAt?.head !== head) {
@@ -607,9 +618,60 @@ export class WorkspaceRuntime implements WorkspaceApi {
     }
     const file = await this.agentsMdAt.file;
     if (!file || !session) return { file, unseen: false };
-    if (this.seen.get(session) === file.version) return { file, unseen: false };
-    this.seen.put(session, file.version);
+    const had = this.seen.get(session, AGENTS_MD);
+    if (had === file.version) return { file, unseen: false };
+    if (had !== null && opts.onlyNew) return { file, unseen: true, stale: true };
+    this.seen.put(session, file.version, AGENTS_MD);
     return { file, unseen: true };
+  }
+
+  /**
+   * Agent session `session` read these files: `version` is what instructions.ts readVersion made of the text it read
+   * (a note's block, AGENTS.md's whole text). Notes without a block aren't recorded.
+   */
+  async markRead(repo: RepoRow, session: string, reads: { path: string; version: string }[]): Promise<void> {
+    this.check(repo);
+    for (const r of reads) this.seen.put(session, r.version, path(r.path));
+  }
+
+  /** The versions of AGENTS.md a session may have read: as committed (as delivered) and as live; none: no AGENTS.md. */
+  private async agentsMdVersions(repo: RepoRow): Promise<string[]> {
+    const out: string[] = [];
+    const file = (await this.agentsMd(repo)).file;
+    if (file) out.push(file.version);
+    const open = this.rooms.peek(repo.id, AGENTS_MD);
+    const live = open && !open.closed ? open.text.toString() : "";
+    if (live.trim()) out.push(readVersion(AGENTS_MD, live)!);
+    return out;
+  }
+
+  /**
+   * Refuse (428) an agent session's write when it hasn't read the latest AGENTS.md or, for `p` (an existing note it
+   * changes; null: only AGENTS.md matters, as for a new file), the note's latest instructions block (instructions.ts).
+   */
+  private async checkRead(repo: RepoRow, session: string, p: string | null, text?: string | null) {
+    const md = await this.agentsMdVersions(repo);
+    if (md.length) {
+      const had = this.seen.get(session, AGENTS_MD);
+      if (had === null || !md.includes(had)) throw unreadAgentsMd(had !== null);
+    }
+    if (p === null) return;
+    if (text === undefined) {
+      const open = this.rooms.peek(repo.id, p);
+      if (open && !open.closed) text = open.text.toString();
+      else {
+        const head = await this.store.head(repo.id, repo.branch);
+        text = head ? await this.store.readFile(repo.id, p, head).catch(() => null) : null;
+      }
+    }
+    const v = text == null ? null : blockVersion(text);
+    if (v !== null && this.seen.get(session, p) !== v) throw unreadNote(p);
+  }
+
+  /** What a session wrote it has read: the block (or AGENTS.md) as it left the file. */
+  private markWritten(session: string, p: string, text: string) {
+    const v = readVersion(p, text);
+    if (v !== null) this.seen.put(session, v, p);
   }
 
   head(repo: RepoRow) {
@@ -739,13 +801,14 @@ export class WorkspaceRuntime implements WorkspaceApi {
    * note's text is pinned right after the write (`Room.pin`), and that text is committed as the agent's
    * (`Room.commitPinned`); what people type meanwhile stays pending for a commit of their own.
    */
-  async applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant): Promise<(string | null)[]> {
+  async applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant, opts: { guard?: string } = {}): Promise<(string | null)[]> {
     this.check(repo);
     const agent = actor.kind === "agent";
     const pins = new Map<Room, PinnedWrite>();
     const out: (string | null)[] = [];
     for (const w of writes) {
       try {
+        if (opts.guard) await this.checkRead(repo, opts.guard, w.base === null ? null : path(w.path), w.base === null ? null : (await this.room(repo, path(w.path))).text.toString());
         if (agent && w.base !== null) await (await this.room(repo, path(w.path))).settle();
         if (w.base === null) await this.createFile(repo, w.path, w.content, actor);
         else if (w.appended !== null) {
@@ -755,6 +818,7 @@ export class WorkspaceRuntime implements WorkspaceApi {
         // (synchronously after the write: nobody's edit can land in between)
         const r = agent ? this.rooms.peek(repo.id, path(w.path)) : undefined;
         if (r && !r.closed) pins.set(r, r.pin(actor));
+        if (opts.guard && r && !r.closed) this.markWritten(opts.guard, r.path, r.text.toString());
         out.push(null);
       } catch (e) {
         out.push(e instanceof Error ? e.message : String(e));

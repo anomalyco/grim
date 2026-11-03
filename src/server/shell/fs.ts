@@ -10,6 +10,7 @@ import type { Participant } from "../rooms.ts";
 import type { ShellSnapshot, ShellWrite } from "../seams/workspace-host.ts";
 import { isMarkdown, MAX_FILE_BYTES, type FileMeta } from "../store/types.ts";
 import { ARTIFACTS_DIR, artifactPathProblem, looksExecutable, MAX_ARTIFACT_BYTES, underArtifacts } from "../../shared/artifacts.ts";
+import { readVersion, UNREAD_STATUS } from "../instructions.ts";
 
 type ReadFileOptions = { encoding?: BufferEncoding | null };
 type WriteFileOptions = { encoding?: BufferEncoding };
@@ -198,6 +199,13 @@ export class NotesFs implements IFileSystem {
   private views = new Map<string, View>();
   private viewBytes = 0;
   private loading = new Map<string, Promise<View>>();
+  /**
+   * The agent session's key (agents-md.ts urlSessionKey / mcpSessionKey): its writes are refused until it read the
+   * latest instructions (instructions.ts), and what it reads is remembered for it. null: nobody's (no checks).
+   */
+  seenKey: string | null = null;
+  /** Instructions (notes' blocks, AGENTS.md) read in this command, by workspace: marked read once it's done (`markReads`). */
+  private readMarks = new Map<string, { repo: RepoRow; versions: Map<string, string> }>();
 
   constructor(
     readonly ctx: ShellCtx,
@@ -225,8 +233,41 @@ export class NotesFs implements IFileSystem {
     if (!(await this.mayWrite(repo))) throw this.writeDenied(repo, op, p);
   }
 
+  /** The guard option of this session's writes (instructions.ts). */
+  private get guard(): { guard?: string } {
+    return this.seenKey ? { guard: this.seenKey } : {};
+  }
+
+  /** Remember that this command read `path`'s text (any read counts, even one that doesn't show the block). */
+  private noteRead(repo: RepoRow, path: string, text: string) {
+    if (!this.seenKey) return;
+    const v = readVersion(path, text);
+    if (v === null) return;
+    let m = this.readMarks.get(repo.id);
+    if (!m) this.readMarks.set(repo.id, (m = { repo, versions: new Map() }));
+    m.versions.set(path, v);
+  }
+
+  /**
+   * Mark what this command read as read by the session. Called when the command is done, so its own writes were
+   * checked without these reads: the agent sees what it read only in this command's output.
+   */
+  async markReads(): Promise<void> {
+    const marks = [...this.readMarks.values()];
+    this.readMarks.clear();
+    if (!this.seenKey) return;
+    await Promise.all(
+      marks.map((m) =>
+        this.host(m.repo)
+          .markRead(m.repo, this.seenKey!, [...m.versions].map(([path, version]) => ({ path, version })))
+          .catch((e: unknown) => console.error(`[shell] mark read in ${m.repo.id}:`, e)),
+      ),
+    );
+  }
+
   /** Forget per-command state (repos, access, read errors) so each command sees fresh state. */
   beginExec() {
+    this.readMarks.clear();
     this.forgetRepos();
     this.writeErrors.clear();
     this.invalidate();
@@ -521,6 +562,7 @@ export class NotesFs implements IFileSystem {
     const t = await this.liveText(n.repo!, n.path);
     if (t === null) throw new FsError("ENOENT", `no such file or directory, ${op} '${this.full(p)}'`);
     this.remember(k, t);
+    this.noteRead(n.repo!, n.path, t);
     return t;
   }
 
@@ -630,7 +672,7 @@ export class NotesFs implements IFileSystem {
       const repo = batch[0]![1].repo;
       try {
         if (!(await this.mayWrite(repo))) throw this.writeDenied(repo, "write", `${WORKSPACE}/${repo.id}/${ARTIFACTS_DIR}`);
-        await this.host(repo).writeArtifacts(repo, batch.map(([, a]) => (a.bytes ? { path: a.path, bytes: a.bytes } : { path: a.path, delete: true })), this.actor);
+        await this.host(repo).writeArtifacts(repo, batch.map(([, a]) => (a.bytes ? { path: a.path, bytes: a.bytes } : { path: a.path, delete: true })), this.actor, this.guard);
         for (const [k, a] of batch) a.bytes ? this.artRead.set(k, a.bytes) : this.artRead.delete(k);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -645,7 +687,7 @@ export class NotesFs implements IFileSystem {
       let results: (string | null)[];
       try {
         if (!(await this.mayWrite(repo))) results = batch.map(([, p]) => this.writeDenied(repo, "write", shown(p)).message);
-        else results = await this.host(repo).applyWrites(repo, writes, this.actor);
+        else results = await this.host(repo).applyWrites(repo, writes, this.actor, this.guard);
       } catch (e) {
         results = batch.map(() => (e instanceof Error ? e.message : String(e)));
       }
@@ -677,7 +719,8 @@ export class NotesFs implements IFileSystem {
 
   private opError(e: unknown, op: string, p: string): never {
     if (isErr(e, "OpError")) {
-      const code = e.status === 404 ? "ENOENT" : e.status === 403 ? "EROFS" : e.status === 409 ? "EBUSY" : "EIO";
+      if (e.status === UNREAD_STATUS) throw new FsError("EACCES", e.message);
+      const code = e.status === 404 ? "ENOENT" : e.status === 403 ? "EROFS" : e.status === 409 ? "EBUSY" : e.status === UNREAD_STATUS ? "EACCES" : "EIO";
       throw new FsError(code, `${e.message}, ${op} '${this.full(p)}'`);
     }
     throw e;
@@ -834,7 +877,7 @@ export class NotesFs implements IFileSystem {
       // A file only this command created, never applied: nothing to delete.
       if (pend?.base !== null || (await this.view(repo)).live.has(path)) {
         await this.recheckWrite(repo, "rm", this.full(p));
-        await this.host(repo).deleteFile(repo, path, this.actor);
+        await this.host(repo).deleteFile(repo, path, this.actor, this.guard);
       }
     } catch (e) {
       if (e instanceof FsError) throw e;
@@ -905,7 +948,7 @@ export class NotesFs implements IFileSystem {
     if (to.repo.id === repo.id && !destExists) {
       try {
         await this.recheckWrite(repo, "mv", this.full(src));
-        await this.host(repo).renameFile(repo, path, to.path, this.actor);
+        await this.host(repo).renameFile(repo, path, to.path, this.actor, this.guard);
       } catch (e) {
         if (e instanceof FsError) throw e;
         this.opError(e, "mv", src);

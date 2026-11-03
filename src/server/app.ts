@@ -231,7 +231,7 @@ export function createApp(deps: AppDeps) {
       if (p === "/" && !config.marketingSite) return new Response(null, { status: 302, headers: { location: "/app" + url.search } });
       // the app's note URLs: for anything but a browser, the workspace's agent instructions and changes (agent-url.ts)
       // or the note itself (note-url.ts); else the app
-      if (isNoteUrl(p)) return wantsApp(req, url) ? withVaryAccept(await deps.staticFile(req, url)) : ((await handleAgentGet(req, url, ctx)) ?? (await noteUrlResponse(url, ctx)));
+      if (isNoteUrl(p)) return wantsApp(req, url) ? withVaryAccept(await deps.staticFile(req, url)) : ((await handleAgentGet(req, url, ctx)) ?? (await noteUrlResponse(req, url, ctx)));
       return await deps.staticFile(req, url);
     } catch (e) {
       return serverError(req, p, e);

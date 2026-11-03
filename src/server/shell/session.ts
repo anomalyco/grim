@@ -31,6 +31,11 @@ export interface ExecOptions {
   directory?: string;
   /** The key concurrent commands are counted under (`pending`): a caller and workspace (default: the actor's id). */
   limitKey?: string;
+  /**
+   * The agent session's key for instructions (agents-md.ts urlSessionKey / mcpSessionKey): its writes need the latest
+   * AGENTS.md and notes' instructions read (instructions.ts), and its reads count as read once the command is done.
+   */
+  seenKey?: string;
 }
 
 export interface ShellOptions {
@@ -249,8 +254,10 @@ class ShellRun {
     access: AccessFn,
     private opts: Required<ShellOptions>,
     readonly home: string,
+    seenKey?: string,
   ) {
     this.fs = new NotesFs(ctx, actor, access);
+    this.fs.seenKey = seenKey ?? null;
     this.shellFs = new ShellFs(this.fs, opts.scratchBytes);
     const user = slugify(actor.name) || "agent";
     this.bash = new Bash({
@@ -326,6 +333,7 @@ class ShellRun {
         if (exitCode === 0) exitCode = 1;
       }
     }
+    await this.fs.markReads();
     if (deadline.timedOut) {
       stderr += `[timed out after ${Math.round(timeoutMs / 1000)} s; the command was stopped and its unsaved writes were discarded]\n`;
       exitCode = 124;
@@ -370,7 +378,7 @@ export class Shells {
     }
     this.running.set(key, (this.running.get(key) ?? 0) + 1);
     try {
-      return await new ShellRun(this.ctx, actor, access, this.opts, home).run(command, cwd, opts.directory ?? cwd, ac.signal, deadline, timeoutMs);
+      return await new ShellRun(this.ctx, actor, access, this.opts, home, opts.seenKey).run(command, cwd, opts.directory ?? cwd, ac.signal, deadline, timeoutMs);
     } finally {
       const n = (this.running.get(key) ?? 1) - 1;
       if (n > 0) this.running.set(key, n);
