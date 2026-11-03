@@ -46,7 +46,7 @@
   --mde-quote: #d4d4d8;
   --mde-selection: rgba(41, 109, 154, 0.18);
   --mde-highlight: rgba(245, 197, 66, 0.3);
-  /* people's lines in a note an agent wrote (authors.ts): a light green with a thin green bar at its left, apart
+  /* review mode's highlights, our edits since it was turned on (authors.ts): a light green with a thin green bar at its left, apart
      from the blue selection and the yellow highlights and find matches */
   --mde-human-tint: rgba(52, 168, 83, 0.13);
   --mde-human-bar: rgba(52, 168, 83, 0.6);
@@ -478,11 +478,11 @@
   padding-block: 3px;
   margin-block: -3px;
 }
-/* people's lines in a note an agent wrote: behind the text, under the selection */
+/* review mode: our lines since it was turned on: behind the text, under the selection */
 .mde-tints { position: absolute; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; }
 /* 8px wider than the text column at its left, so the bar doesn't touch the text */
 .mde .mde-tint { position: absolute; margin-left: -8px; padding-left: 8px; background: var(--mde-human-tint); box-shadow: inset 2px 0 0 var(--mde-human-bar); border-radius: 0 2px 2px 0; }
-.no-authors .mde-authors, .no-authors .mde-tints { display: none; }
+.no-authors .mde-authors { display: none; }
 
 /* phones: slightly smaller code, tighter margins */
 @media (max-width: 520px) {

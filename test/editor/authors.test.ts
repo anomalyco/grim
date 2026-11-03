@@ -1,9 +1,9 @@
 // Line authors in the margin: which lines show a name (authors.ts), the values following edits between the room's
 // messages (shared/lineauthors.ts), and reading the message (collab.ts).
 import { describe, expect, test } from "bun:test";
-import { authorHover, authorLabel, authorMarks, fitsMargin, tinted, type MarkLine } from "../../src/client/editor-rs/authors.ts";
+import { authorHover, authorLabel, authorMarks, fitsMargin, reviewed, type MarkLine } from "../../src/client/editor-rs/authors.ts";
 import { parseBlame } from "../../src/client/editor-rs/collab.ts";
-import { attribute, KEEP } from "../../src/shared/lineauthors.ts";
+import { attribute, KEEP, LineMemory } from "../../src/shared/lineauthors.ts";
 
 const L = (type: string, opts: { empty?: boolean; hidden?: boolean } = {}): MarkLine => ({ type, empty: !!opts.empty, hidden: !!opts.hidden });
 const P = L("paragraph");
@@ -114,14 +114,45 @@ test("agents' labels: the session's title, or Agent; the hover has the agent and
   expect(authorHover(ann)).toBeNull();
 });
 
-test("tinted: people's lines (signed in or guests) in a note an agent created, nothing else", () => {
-  const ann = { id: "u", name: "Ann", kind: "human", color: "#000" };
-  const guest = { id: "g", name: "moist-noodle", kind: "guest", color: "#000" };
-  const bot = { id: "a", name: "OpenCode", kind: "agent", color: "#000" };
-  expect([ann, guest, bot].map((a) => tinted("agent", a))).toEqual([true, true, false]);
-  expect([ann, guest, bot].map((a) => tinted("human", a))).toEqual([false, false, false]);
-  expect(tinted(undefined, ann)).toBe(false);
-  expect(tinted("agent", undefined)).toBe(false);
+test("reviewed: our lines that aren't lines of the baseline; not others', not blank, not changed by others since", () => {
+  const base = "agent one\nagent two\nagent three";
+  // we (1) changed line 2 and added line 3; the agent (0) rewrote line 1 after we'd touched it
+  expect(reviewed(base, "agent one\nAGENT\nagent three!\nmine", [0, 0, 1, 1], 1)).toEqual([false, false, true, true]);
+  // undone (or typed back): the line is the baseline's again, even while still ours
+  expect(reviewed(base, "agent one\nagent two\nagent three", [1, 1, 1], 1)).toEqual([false, false, false]);
+  // blank lines, someone else's edit since the last message, and no self: nothing
+  expect(reviewed(base, "agent one\n \nx", [0, 1, 1], 1, [0, 0, 1])).toEqual([false, false, false]);
+  expect(reviewed(base, "x", [1], -1)).toEqual([false]);
+});
+
+test("attribute with a LineHistory: undo, redo and typing a line back give it back to whoever had that text", () => {
+  const h = new LineMemory();
+  const AGENT = 0, ME = 1;
+  let text = "title\nagent line\nend";
+  let v = [AGENT, AGENT, AGENT];
+  const edit = (next: string, who: number) => {
+    v = attribute(text, next, v, who, h);
+    text = next;
+  };
+  edit("title\nagent line, edited\nend", ME);
+  expect(v).toEqual([AGENT, ME, AGENT]);
+  edit("title\nagent line\nend", ME); // undo
+  expect(v).toEqual([AGENT, AGENT, AGENT]);
+  edit("title\nagent line, edited\nend", ME); // redo
+  expect(v).toEqual([AGENT, ME, AGENT]);
+  edit("title\nagent line, edite\nend", ME); // typing back, a key at a time
+  edit("title\nagent lin\nend", ME);
+  expect(v).toEqual([AGENT, ME, AGENT]);
+  edit("title\nagent line\nend", ME);
+  expect(v).toEqual([AGENT, AGENT, AGENT]);
+  // a deleted line put back (undo of the deletion)
+  edit("title\nend", ME);
+  edit("title\nagent line\nend", ME);
+  expect(v).toEqual([AGENT, AGENT, AGENT]);
+  // blank lines and KEEP don't use the history
+  edit("title\n\nagent line\nend", ME);
+  expect(v).toEqual([AGENT, ME, AGENT, AGENT]);
+  expect(attribute("a\nb", "a\nbb", [0, 1], KEEP, h)).toEqual([0, 1]);
 });
 
 describe("the margin layer (DOM)", () => {
@@ -205,9 +236,17 @@ describe("the margin layer (DOM)", () => {
       expect(named!.title).toBe("A very long session title that will not fit\nOpenCode · ses_1");
       expect((named!.firstElementChild as HTMLElement).style.maxWidth).toBe("149px");
       expect(plain!.title).toBe("Agent\nOpenCode · ses_2");
-      // the note was created by an agent: Alice's line is tinted, the agents' aren't
+      // no tint without review mode, even in a note an agent created
+      expect(g.tints.children.length).toBe(0);
+      // review mode from a text where line 0 was something else: our (u1's) line 0 is tinted, the agents' aren't
+      g.setReview("Alice's old line\nBob's line\nMax's line");
+      g.draw();
       expect([...g.tints.querySelectorAll<HTMLElement>(".mde-tint")].map((t) => [t.style.top, t.style.height, t.style.left, t.style.width])).toEqual([["50px", "25px", "177px", "711px"]]);
-      g.set({ authors: [{ id: "u1", name: "Alice", kind: "human", color: "#ff0000" }, { id: "a#2", name: "OpenCode", kind: "agent", color: "#0000ff", session: "ses_2" }], lines: [0, 1, 0], origin: "human" });
+      // from the current text: nothing yet; off: nothing
+      g.setReview(texts.join("\n"));
+      g.draw();
+      expect(g.tints.children.length).toBe(0);
+      g.setReview(null);
       g.draw();
       expect(g.tints.children.length).toBe(0);
       g.destroy();

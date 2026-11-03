@@ -10,10 +10,11 @@ import { applyDiff } from "./textdiff.ts";
 import { withSessionTrailer, type Author, type CommitOutcome, type GitStore } from "./store/types.ts";
 import { isErr } from "./errors.ts";
 import type { PresenceState, PresenceUser } from "../shared/presence.ts";
-import { attribute } from "../shared/lineauthors.ts";
+import { attribute, LineMemory } from "../shared/lineauthors.ts";
+import { linePairs } from "../shared/textdiff.ts";
 import type { RoomStorage } from "./seams/room-storage.ts";
 import type { Db } from "./seams/db.ts";
-import { blameMessage, gitIdentity, originLines, originOf, rebase, resolveAuthors, UNKNOWN, type BlameMessage, type LineAuthor, type NoteOrigin, type OriginAuthors } from "./blame.ts";
+import { baseIndex, blameMessage, gitIdentity, isBaseLine, originLines, originOf, rebase, resolveAuthors, UNKNOWN, type BlameMessage, type LineAuthor, type NoteOrigin, type OriginAuthors } from "./blame.ts";
 
 export const MSG_SYNC = 0;
 export const MSG_AWARENESS = 1;
@@ -182,6 +183,11 @@ export class Room {
   /** Line authors (blame.ts): one value per line of `liveText`. */
   private lineValues: number[] = [UNKNOWN];
   private liveText = "";
+  /**
+   * Who had the line texts edits took away (lineauthors.ts LineHistory): a line whose exact text comes back (undo,
+   * redo, typed back) gets that author again. Saved with the line values (room_meta.blame.history).
+   */
+  private history = new LineMemory();
   /** Everyone who changed the text in this room; lineValues ≥ 0 index into it. */
   private people: Person[] = [];
   /** The commit whose text the origin lines are lines of, and its Git blame with authors resolved (null until loaded). */
@@ -363,7 +369,7 @@ export class Room {
    * (with the line values saved alongside it), each later row an update by its `author`.
    */
   private replay(rows: Array<{ data: Uint8Array | ArrayBuffer; author: number | null }>, meta: { base_commit: string | null; base_content: string; blame: string | null; blame_people: string | null }) {
-    let saved: { origin: string | null; lines: number[] } | null = null;
+    let saved: { origin: string | null; lines: number[]; history?: Array<[string, number]> } | null = null;
     try {
       saved = meta.blame ? JSON.parse(meta.blame) : null;
       this.people = meta.blame_people ? JSON.parse(meta.blame_people) : [];
@@ -376,8 +382,13 @@ export class Room {
     rows.forEach((r, i) => {
       Y.applyUpdate(this.doc, new Uint8Array(r.data), LOAD);
       const next = this.text.toString();
-      if (i === 0) values = saved && saved.lines.length === next.split("\n").length ? saved.lines : null;
-      else if (values) values = attribute(prev, next, values, r.author !== null && this.people[r.author] ? r.author : UNKNOWN);
+      if (i === 0) {
+        values = saved && saved.lines.length === next.split("\n").length ? saved.lines : null;
+        if (values) this.history = new LineMemory(Array.isArray(saved?.history) ? saved.history : []);
+      } else if (values) {
+        const by = r.author !== null && this.people[r.author] ? r.author : UNKNOWN;
+        values = attribute(prev, next, values, by, by >= 0 ? this.history : undefined);
+      }
       prev = next;
     });
     this.liveText = prev;
@@ -409,7 +420,7 @@ export class Room {
   /** The text changed (by `by`) since liveText: move the line authors along. */
   private track(by: number) {
     const next = this.text.toString();
-    this.lineValues = attribute(this.liveText, next, this.lineValues, by);
+    this.lineValues = attribute(this.liveText, next, this.lineValues, by, by >= 0 ? this.history : undefined);
     this.liveText = next;
   }
 
@@ -459,6 +470,8 @@ export class Room {
   /** The origin text is now `text` at `commit` (merged from outside, or gone): re-point origin lines, fetch its blame. */
   private setOrigin(commit: string | null, text: string | null) {
     this.lineValues = rebase(this.lineValues, this.liveText, text);
+    // remembered origin lines were lines of the old origin text
+    this.history.remap((v) => (isBaseLine(v) ? undefined : v));
     this.originCommit = commit;
     this.loadBlame();
   }
@@ -616,7 +629,7 @@ export class Room {
         this.baseCommit,
         this.baseContent,
         Y.encodeSnapshot(this.baseSnapshot),
-        JSON.stringify({ origin: this.originCommit, lines: this.lineValues }),
+        JSON.stringify({ origin: this.originCommit, lines: this.lineValues, history: this.history.entries() }),
         JSON.stringify(this.people),
         this.savedState(),
       );
@@ -716,14 +729,17 @@ export class Room {
         continue;
       }
       // Capture content and snapshot together, synchronously, before awaiting the commit.
+      this.flushPending();
       const content = this.text.toString();
       const snap = Y.snapshot(this.doc);
       const contributors = [...this.contributors.values()].sort((a, b) => b.edits - a.edits);
       this.contributors.clear();
       this.saving = true;
       this.broadcastStatus();
-      const author = contributors[0]?.author ?? { name: "Grim", email: "grimoire@users.noreply.code.storage" };
-      const coauthors = contributors.slice(1).map((c) => `Co-authored-by: ${c.author.name} <${c.author.email}>`);
+      // an undo (or typing back) after a save puts someone else's text back: their commit, so Git blame keeps them
+      const restored = this.restoredAuthor(content, contributors);
+      const author = restored ?? contributors[0]?.author ?? { name: "Grim", email: "grimoire@users.noreply.code.storage" };
+      const coauthors = restored ? [] : contributors.slice(1).map((c) => `Co-authored-by: ${c.author.name} <${c.author.email}>`);
       const verb = this.inBase ? "Update" : "Create";
       const message = withSessionTrailer(`${verb} ${this.path}` + (coauthors.length ? `\n\n${coauthors.join("\n")}` : ""), author);
       let res: CommitOutcome | null = null;
@@ -761,6 +777,42 @@ export class Room {
       return;
     }
     throw new Error("could not commit after repeated conflicts");
+  }
+
+  /**
+   * The author to commit `content` as when every line it adds or changes (blank ones aside) is, by the line
+   * authors, one author's text that none of the `contributors` wrote (lines put back by undo or retyped as they
+   * were): that author. Else null (the contributors commit as usual).
+   */
+  private restoredAuthor(content: string, contributors: Contributor[]): Author | null {
+    if (content !== this.liveText || !this.inBase) return null;
+    const live = content.split("\n");
+    const kept = new Set(linePairs(this.baseContent.split("\n"), live).map(([, b]) => b));
+    let found: Author | null = null;
+    for (let i = 0; i < live.length; i++) {
+      if (kept.has(i) || !live[i]!.trim()) continue;
+      const a = this.gitAuthorOf(this.lineValues[i] ?? UNKNOWN);
+      if (!a || (found && gitIdentity(found) !== gitIdentity(a))) return null;
+      found = a;
+    }
+    const key = found && gitIdentity(found);
+    if (!found || contributors.some((c) => gitIdentity(c.author) === key)) return null;
+    return found;
+  }
+
+  /** The Git author of a line value: a participant's commit identity, or the origin line's Git author. */
+  private gitAuthorOf(v: number): Author | null {
+    if (v >= 0) {
+      const p = this.people[v];
+      if (!p) return null;
+      return { name: p.gitName, email: p.email, ...(p.session ? { session: p.session, ...(p.sessionName ? { sessionName: p.sessionName } : {}) } : {}) };
+    }
+    if (!isBaseLine(v)) return null;
+    const o = this.originAuthors;
+    const a = o?.authors[o.lines[baseIndex(v)] ?? UNKNOWN];
+    if (!a) return null;
+    const [name = "", email = "", session] = a.git.split("\0");
+    return { name, email, ...(session ? { session, ...(a.sessionName ? { sessionName: a.sessionName } : {}) } : {}) };
   }
 
   /**

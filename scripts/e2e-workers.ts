@@ -15,6 +15,7 @@ export const SUITES = [
   "links",
   "autoname",
   "blame",
+  "review",
   "tree-keys",
   "newnote-focus",
   "wide-blocks",

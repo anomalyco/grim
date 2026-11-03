@@ -3,11 +3,14 @@
 // message's colours aren't used here), only where it changes. People's names are never cut (one that doesn't fit the
 // margin isn't shown); an agent's lines show its session's title ("Agent" without one), cut with "…" to the margin.
 // Hovering an agent's label shows the full title, the agent and the session id.
-// In a note an agent created (the message's `origin`), lines people wrote get a light green tint (and a thin bar at its left) behind the text.
+// Review mode (setReview, turned on per note by the user): lines we wrote since it was turned on (ours by the line
+// authors, and not a line of the text it started from) get a light green tint (and a thin bar at its left) behind the text.
 // Between messages the values move with the text (attribute): our own edits are ours at once, others' keep the
-// line's previous author until the next message.
+// line's previous author until the next message. An edit that brings back a line's exact text (undo, redo, typing it
+// back) gives it back to whoever had that text (the client's LineHistory, as the room's), so there's no flicker.
 
-import { attribute, KEEP } from "../../shared/lineauthors.ts";
+import { attribute, KEEP, LineMemory, type LineHistory } from "../../shared/lineauthors.ts";
+import { linePairs } from "../../shared/textdiff.ts";
 import type { Blame, BlameAuthor } from "./collab.ts";
 import { crashSafe } from "./guard.ts";
 import type { RLine } from "./lineview.ts";
@@ -75,11 +78,19 @@ export function authorHover(a: Pick<BlameAuthor, "kind" | "name" | "session" | "
 }
 
 /**
- * Whether line authors tint the line: in a note an agent created, lines people (signed in or guests) wrote. Not
- * empty or folded lines.
+ * Review mode's highlighted lines: per line of `text`, whether it's ours (`values[i] === self`), not blank, not
+ * changed by someone else since the last message (`others[i]`), and not a line of `baseline` (the text review
+ * mode started from, matched by a line diff: undoing or typing a line back as it was ends its highlight).
  */
-export function tinted(origin: Blame["origin"], author: BlameAuthor | undefined): boolean {
-  return origin === "agent" && !!author && (author.kind === "human" || author.kind === "guest");
+export function reviewed(baseline: string, text: string, values: number[], self: number, others: ArrayLike<number> = []): boolean[] {
+  const lines = text.split("\n");
+  const out = new Array<boolean>(lines.length).fill(false);
+  if (self < 0) return out;
+  const kept = new Set(linePairs(baseline.split("\n"), lines).map(([, b]) => b));
+  lines.forEach((l, i) => {
+    out[i] = values[i] === self && !others[i] && !kept.has(i) && !!l.trim();
+  });
+  return out;
 }
 
 /** What the layer needs of the editor view. */
@@ -95,9 +106,16 @@ export class AuthorGutter {
   /** The tints behind the text (under the text column, below the selection). */
   readonly tints: HTMLDivElement;
   private authors: BlameAuthor[] = [];
-  private origin: Blame["origin"];
   /** One per line of the view's text (once a message arrived). */
   private values: number[] = [];
+  /** Per line: 1 where someone else changed it since the last message (its author is theirs until it comes). */
+  private others: number[] = [];
+  /** Who had the line texts our edits took away (by author id, so it outlives messages). */
+  private memory = new LineMemory();
+  private remembered: BlameAuthor[] = [];
+  /** Review mode's starting text (null: off), and the highlighted lines' count last drawn. */
+  private review: string | null = null;
+  private reviewCount = -1;
   private has = false;
   private self = -1;
   private frame = 0;
@@ -105,6 +123,8 @@ export class AuthorGutter {
   constructor(
     private view: AuthorHost,
     private me: { id: string; name: string; color: string; kind?: string },
+    /** Review mode's highlighted lines changed in number. */
+    private onReview?: (count: number) => void,
   ) {
     this.layer = document.createElement("div");
     this.layer.className = "mde-authors";
@@ -119,7 +139,7 @@ export class AuthorGutter {
   set(blame: Blame): void {
     this.authors = blame.authors.slice();
     this.values = blame.lines.slice();
-    this.origin = blame.origin;
+    this.others = this.values.map(() => 0);
     this.self = this.authors.findIndex((a) => a.id === this.me.id);
     this.has = true;
     this.layer.classList.add("has-blame");
@@ -134,8 +154,33 @@ export class AuthorGutter {
       if (this.self < 0) this.self = this.authors.push({ id: this.me.id, name: this.me.name, kind: this.me.kind ?? "human", color: this.me.color }) - 1;
       who = this.self;
     }
-    this.values = attribute(prev, next, this.values, who);
+    this.values = attribute(prev, next, this.values, who, who === KEEP ? undefined : this.history);
+    this.others = attribute(prev, next, this.others, local ? 0 : 1);
   }
+
+  /** Review mode on (`baseline`: the text it started from) or off (null). */
+  setReview(baseline: string | null): void {
+    this.review = baseline;
+    this.schedule();
+  }
+
+  /** The line history on author ids (values index `authors`, which each message replaces). */
+  private history: LineHistory = {
+    remember: (text, v) => {
+      const a = this.authors[v];
+      if (!a) return this.memory.remember(text, -1);
+      let n = this.remembered.findIndex((r) => r.id === a.id);
+      if (n < 0) n = this.remembered.push(a) - 1;
+      this.memory.remember(text, n);
+    },
+    recall: (text) => {
+      const n = this.memory.recall(text);
+      if (n === undefined || n < 0) return n;
+      const a = this.remembered[n]!;
+      const i = this.authors.findIndex((x) => x.id === a.id);
+      return i >= 0 ? i : this.authors.push(a) - 1;
+    },
+  };
 
   schedule(): void {
     if (this.frame) return;
@@ -152,6 +197,7 @@ export class AuthorGutter {
     const frag = document.createDocumentFragment();
     const tints = document.createDocumentFragment();
     let room = 0;
+    let count = 0;
     if (this.has && v.doc.lines.length === v.lines.length && lineDivs(v.root).length === v.lines.length) {
       const base = v.wrapper.getBoundingClientRect();
       const box = v.root.getBoundingClientRect();
@@ -163,8 +209,10 @@ export class AuthorGutter {
         const span = v.doc.lines[i]!;
         return { type: l.type, hidden: l.hidden, empty: !v.doc.text.slice(span.from, span.to).trim() };
       });
-      // people's lines in a note an agent made: one tint per run of them, the text column's width
-      if (this.origin === "agent") {
+      // review mode: our lines since it started, one tint per run of them, the text column's width
+      if (this.review !== null) {
+        const mine = reviewed(this.review, v.doc.text, this.values, this.self, this.others);
+        count = mine.filter(Boolean).length;
         let run: { top: number; bottom: number } | null = null;
         const flush = () => {
           if (!run) return;
@@ -178,7 +226,7 @@ export class AuthorGutter {
           run = null;
         };
         lines.forEach((l, i) => {
-          if (l.hidden || l.empty || !tinted(this.origin, this.authors[this.values[i] ?? -1])) return flush();
+          if (l.hidden || l.empty || !mine[i]) return flush();
           const r = (kids[i] as HTMLElement).getBoundingClientRect();
           if (r.height <= 0) return;
           if (run && Math.abs(r.top - run.bottom) < 1) run.bottom = r.bottom;
@@ -235,6 +283,11 @@ export class AuthorGutter {
       }
     }
     this.tints.replaceChildren(tints);
+    if (this.review === null) count = 0;
+    if (count !== this.reviewCount) {
+      this.reviewCount = count;
+      this.onReview?.(count);
+    }
     this.layer.replaceChildren(frag);
     // a person's name wider than the margin would run into the text: it isn't shown (never cut)
     for (const el of Array.from(this.layer.children) as HTMLElement[]) {

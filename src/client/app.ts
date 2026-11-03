@@ -2,6 +2,7 @@
 import { ARTIFACTS_DIR } from "../shared/artifacts.ts";
 import { uiFontsLoaded } from "./fonts.ts";
 import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
+import { loadReview, reviewLabel, saveReview } from "./review.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { warmCode } from "./editor-rs/code.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
@@ -206,6 +207,8 @@ const saveStatusEl = h("div", { class: "save-status", "aria-live": "polite" });
 const SHOW_AUTHORS_KEY = "grimoire.showAuthors";
 /** The header's "⋯": History, Authors, the open note's Rename / Delete and Copy Link. */
 const moreBtn = h("button", { type: "button", class: "icon-btn doc-more", title: "More", "aria-label": "More actions", "aria-haspopup": "menu", "aria-expanded": "false", hidden: true }, "⋯");
+/** Review mode for the open note (⌘⌥R / Ctrl+Alt+R): highlights our edits since it was turned on (review.ts). */
+const reviewBtn = h("button", { type: "button", class: "review-toggle", "aria-pressed": "false", title: `Review mode: highlight your edits from now on (${IS_MAC ? "⌘⌥R" : "Ctrl+Alt+R"})`, hidden: true, onclick: () => toggleReview() }, "Review");
 const docBody = h("div", { class: "doc-body" });
 const history = new HistoryPanel((open) => app.classList.toggle("history-open", open));
 const switcherBtn = h("button", { type: "button", class: "ws-switcher", "aria-haspopup": "menu", "aria-expanded": "false" });
@@ -377,7 +380,7 @@ function renderShell() {
     h("main", { class: "main" },
       h("header", { class: "doc-header" },
         h("button", { type: "button", class: "icon-btn sidebar-toggle", "aria-label": "Sidebar", "aria-expanded": "false", "aria-controls": "sidebar", onclick: () => setSidebarOpen(!app.classList.contains("sidebar-open")) }, h("span", { class: "burger", "aria-hidden": "true" })),
-        navEl, breadcrumbEl, sourceEl, h("div", { class: "spacer" }), saveStatusEl, participantsEl, moreBtn,
+        navEl, breadcrumbEl, sourceEl, h("div", { class: "spacer" }), saveStatusEl, participantsEl, reviewBtn, moreBtn,
       ),
       docBody,
     ),
@@ -404,6 +407,14 @@ function renderShell() {
       closeMenu();
       if (e.code === "BracketLeft") goBack();
       else goForward();
+      return;
+    }
+    // ⌘⌥R (Ctrl+Alt+R elsewhere): review mode on or off for the open note
+    if ((IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) && e.altKey && !e.shiftKey && e.code === "KeyR") {
+      if (document.querySelector("dialog[open]") || !session) return;
+      e.preventDefault();
+      e.stopPropagation();
+      toggleReview();
       return;
     }
     // ⌘⇧E (Ctrl+Shift+E elsewhere): the file tree, at the current row, from anywhere.
@@ -1439,6 +1450,7 @@ function noteMenu(): MenuItem[] {
   return [
     { label: history.open ? "Hide History" : "Show History", run: () => history.toggle() },
     { label: showAuthors() ? "Hide Authors" : "Show Authors", run: () => setShowAuthors(!showAuthors()) },
+    { label: loadReview(repoId, path) ? "Turn Off Review Mode" : "Review Mode", run: () => toggleReview() },
     "sep",
     { label: "Rename…", disabled: readOnly, run: () => repo && revealRow(repo, path) && renameNoteInline(repo, path) },
     { label: "Delete…", disabled: readOnly, danger: true, run: () => repo && revealRow(repo, path) && void deleteRowByKey(`file:${fkey(repo.id, path)}`) },
@@ -2428,8 +2440,30 @@ function showEmpty() {
   ));
 }
 
+/** Review mode on or off for the open note (on: from its text now; off: the highlights and the baseline go). */
+function toggleReview() {
+  if (!session) return;
+  const on = !loadReview(session.repo, session.path);
+  const baseline = on ? session.liveText() : null;
+  if (on && baseline === null) return toast("The note is still loading.", "info");
+  saveReview(session.repo, session.path, baseline);
+  session.setReview(baseline);
+  renderReview();
+}
+
+/** The header's review toggle for the open note. */
+function renderReview() {
+  reviewBtn.hidden = !session;
+  if (!session) return;
+  const on = !!loadReview(session.repo, session.path);
+  reviewBtn.setAttribute("aria-pressed", String(on));
+  reviewBtn.classList.toggle("on", on);
+  reviewBtn.textContent = reviewLabel(on, session.reviewCount);
+}
+
 function renderHeader() {
   moreBtn.hidden = !session;
+  renderReview();
   if (!session && history.open) history.close();
   if (!current) {
     clear(breadcrumbEl);
@@ -2566,6 +2600,8 @@ class Session {
   readonly localUser: PresenceState["user"];
   readonly host = h("div", { class: "editor-host" });
   private editor: EditorHandle | null = null;
+  /** Review mode's highlighted lines (the header's toggle shows the count). */
+  reviewCount = 0;
   private fallback: (() => void) | null = null;
   /** Unsaved text from a crashed session that couldn't be merged, shown above the editor. */
   private banner: HTMLElement | null = null;
@@ -2897,7 +2933,11 @@ class Session {
       upload: async (file: File) => (await api.uploadImage(this.repo, this.path, file)).markdown,
       notice: (m: string, kind?: "info" | "error") => toast(m, kind),
     };
-    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t), upload, onEnter: () => this.autoName() });
+    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t), upload, onEnter: () => this.autoName(), onReview: (n) => {
+      this.reviewCount = n;
+      if (session === this) renderReview();
+    } });
+    this.editor.setReview(loadReview(this.repo, this.path)?.baseline ?? null);
     if (focus) this.editor.focus();
     if (focus && typedAhead?.path === this.path && performance.now() <= typedAhead.until) void this.replayTypedAhead(this.editor);
     const carry = this.carry;
@@ -2927,6 +2967,15 @@ class Session {
     this.hashDone = true;
     if (this.spot) this.restore(this.spot);
     this.markShown();
+  }
+
+  /** The live editor's text (null until it's up). */
+  liveText(): string | null {
+    return this.editor ? this.editor.text() : null;
+  }
+
+  setReview(baseline: string | null) {
+    this.editor?.setReview(baseline);
   }
 
   /** The note's caret and scroll as it was left (Back / Forward), once its editor is up. */

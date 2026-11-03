@@ -35,6 +35,8 @@ export type RustViewOptions = {
   upload?: ImageUploader;
   /** The user pressed Enter (a new line), after the engine handled it. */
   onEnter?: () => void;
+  /** Review mode's highlighted lines changed in number (collab views). */
+  onReview?: (count: number) => void;
 } & (
   | {
       /** The document's text. */
@@ -171,7 +173,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.cursors = new RemoteCursors(this);
     this.code = new CodeHighlight(this);
     if (opts.collab) {
-      this.authors = new AuthorGutter(this, opts.collab.user as { id: string; name: string; color: string; kind?: string });
+      this.authors = new AuthorGutter(this, opts.collab.user as { id: string; name: string; color: string; kind?: string }, opts.onReview);
       if (opts.collab.blame) this.authors.set(opts.collab.blame);
     }
     this.foldKey = opts.collab ? foldStorageKey(opts.collab.repo, opts.collab.path) : opts.foldKey ? `grimoire.folds:${opts.foldKey}` : null;
@@ -553,6 +555,11 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     } finally {
       this.remoteApply = false;
     }
+  }
+
+  /** Review mode on (the text it started from) or off (null): our lines since then are highlighted. */
+  setReview(baseline: string | null): void {
+    this.authors?.setReview(baseline);
   }
 
   /** The room sent new line authors. */
