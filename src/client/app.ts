@@ -11,6 +11,7 @@ import { api, ApiError, rawUrl, setGuest, type AppEvent, type Me, type PresenceU
 import { anonIdentity, setAnonName, signInDialog, signInDirect, type AnonIdentity, type SignInReason } from "./signin.ts";
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
+import { canGoBack, canGoForward, goBack, goForward, initNav, navPopped, navPush, navReplace, type Spot } from "./nav.ts";
 
 import { confirmDialog, copyText, deleteAccountDialog, promptDialog, shareDialog, welcomeDialog } from "./dialogs.ts";
 import { openFileSearch } from "./filesearch.ts";
@@ -193,6 +194,9 @@ const agentCard = h("div", { class: "sb-agent", hidden: true }, h("span", { clas
 /** The very bottom of the sidebar: who's signed in; opens the account menu (upward). */
 const accountBtn = h("button", { type: "button", class: "sb-account", "aria-haspopup": "menu", "aria-expanded": "false" });
 const breadcrumbEl = h("div", { class: "breadcrumb" });
+const backBtn = h("button", { type: "button", class: "icon-btn nav-btn", title: `Back (${IS_MAC ? "⌘" : "Ctrl+"}[)`, "aria-label": "Back", disabled: true, onclick: () => goBack() }, h("span", { class: "chev chev-left", "aria-hidden": "true" }));
+const forwardBtn = h("button", { type: "button", class: "icon-btn nav-btn", title: `Forward (${IS_MAC ? "⌘" : "Ctrl+"}])`, "aria-label": "Forward", disabled: true, onclick: () => goForward() }, h("span", { class: "chev", "aria-hidden": "true" }));
+const navEl = h("div", { class: "nav-btns" }, backBtn, forwardBtn);
 const sourceEl = h("div", { class: "doc-source" });
 const participantsEl = h("div", { class: "participants" });
 const saveStatusEl = h("div", { class: "save-status", "aria-live": "polite" });
@@ -265,6 +269,8 @@ async function boot() {
     me = { id: `guest:${guest.id}`, login: "", name: guest.name, email: "", avatar: null, color: guest.color };
   }
   if (landing) return showLanding(signedIn);
+  initNav(renderNav);
+  renderNav();
   loadTreeState();
   renderShell();
   shellUp = true;
@@ -290,7 +296,12 @@ async function boot() {
   renderSwitcher();
   renderTree();
   resumeAfterSignIn();
-  window.addEventListener("popstate", () => void route());
+  window.addEventListener("popstate", () => {
+    // the browser's Back / Forward (or the header's): where it left keeps its scroll and caret; where it is gets its own
+    pendingSpot = navPopped(spotHere());
+    renderNav();
+    void route();
+  });
   setInterval(renderSaveStatus, 30_000);
   await firstViewReady();
   reveal();
@@ -364,7 +375,7 @@ function renderShell() {
     h("main", { class: "main" },
       h("header", { class: "doc-header" },
         h("button", { type: "button", class: "icon-btn sidebar-toggle", "aria-label": "Sidebar", "aria-expanded": "false", "aria-controls": "sidebar", onclick: () => setSidebarOpen(!app.classList.contains("sidebar-open")) }, h("span", { class: "burger", "aria-hidden": "true" })),
-        breadcrumbEl, sourceEl, h("div", { class: "spacer" }), saveStatusEl, participantsEl, moreBtn,
+        navEl, breadcrumbEl, sourceEl, h("div", { class: "spacer" }), saveStatusEl, participantsEl, moreBtn,
       ),
       docBody,
     ),
@@ -381,6 +392,16 @@ function renderShell() {
       if (document.querySelector("dialog[open]:not(.fs-modal)")) return;
       closeMenu();
       void searchFiles();
+      return;
+    }
+    // ⌘[ / ⌘] (Ctrl+[ / Ctrl+] elsewhere): Back and Forward, as the header's ‹ ›
+    if ((IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) && !e.shiftKey && !e.altKey && (e.code === "BracketLeft" || e.code === "BracketRight")) {
+      if (document.querySelector("dialog[open]")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeMenu();
+      if (e.code === "BracketLeft") goBack();
+      else goForward();
       return;
     }
     // ⌘⇧E (Ctrl+Shift+E elsewhere): the file tree, at the current row, from anywhere.
@@ -582,7 +603,7 @@ function toastIfDeleted() {
 
 function switchWorkspace(id: string) {
   if (id === wsId && current) return;
-  window.history.pushState(null, "", urlFor(id));
+  pushPlace(urlFor(id));
   void route();
 }
 
@@ -808,7 +829,7 @@ async function openRemote(ref: WorkspaceRef) {
         // (the folder may not exist: route() says so)
       }
     }
-    window.history.pushState(null, "", urlFor(ref.workspace, path ?? undefined));
+    pushPlace(urlFor(ref.workspace, path ?? undefined));
     await route();
     return;
   }
@@ -1902,8 +1923,8 @@ function parseRoute(): { repo: string; path: string | null } | null {
 function navigate(repo: string, path: string, replace = false) {
   const url = urlFor(repo, path);
   if (location.pathname !== url) {
-    if (replace) window.history.replaceState(null, "", url);
-    else window.history.pushState(null, "", url);
+    if (replace) navReplace(url);
+    else pushPlace(url);
   }
   void route();
 }
@@ -1912,8 +1933,8 @@ function navigate(repo: string, path: string, replace = false) {
 let skipLastNote = false;
 function goHome(replace = false) {
   skipLastNote = true;
-  if (replace) window.history.replaceState(null, "", "/app");
-  else window.history.pushState(null, "", "/app");
+  if (replace) navReplace("/app");
+  else pushPlace("/app");
   void route();
 }
 
@@ -2001,7 +2022,7 @@ async function route() {
   // the demo is for people who aren't signed in on a hosted server: an account goes to its own workspace instead (a
   // server without sign-in has no demo)
   if ((r?.repo === DEMO_ID || isDemoRoom(r?.repo)) && (hasAccount() || noSignIn)) {
-    window.history.replaceState(null, "", "/app");
+    navReplace("/app");
     r = null;
   }
   const last = !r && !skipLast ? readLastNote() : null;
@@ -2014,7 +2035,7 @@ async function route() {
   }
   if (!id && !signedIn) {
     // nothing to open for a guest (a hosted server has no shared workspace): the public demo
-    window.history.replaceState(null, "", urlFor(DEMO_ID) + location.search + location.hash);
+    navReplace(urlFor(DEMO_ID) + location.search + location.hash);
     return route();
   }
   // an account landing here for the first time in this browser (nothing asked for, nothing opened before) asks too:
@@ -2029,7 +2050,7 @@ async function route() {
     if (own && (!id || own.created)) {
       await loadRepos();
       if (seq !== routeSeq) return;
-      window.history.replaceState(null, "", urlFor(own.id) + location.search + location.hash);
+      navReplace(urlFor(own.id) + location.search + location.hash);
       // just made: once it's open, the one-time welcome (remembered, so a retry or reload doesn't show it again)
       const welcome = own.created && !noSignIn && !welcomed(me.id);
       if (welcome) markWelcomed(me.id);
@@ -2051,7 +2072,7 @@ async function route() {
   if (seq !== routeSeq) return;
   if (r?.path) {
     const canonical = urlFor(id, r.path);
-    if (location.pathname !== canonical) window.history.replaceState(null, "", canonical + location.search + location.hash);
+    if (location.pathname !== canonical) navReplace(canonical + location.search + location.hash);
     return openFile(id, r.path);
   }
   const remembered = skipLast ? undefined : lastNotes()[canonId(id)];
@@ -2062,10 +2083,10 @@ async function route() {
   const target = await defaultFile(id, remembered);
   if (seq !== routeSeq) return;
   if (target) {
-    window.history.replaceState(null, "", urlFor(id, target));
+    navReplace(urlFor(id, target));
     return openFile(id, target);
   }
-  if (location.pathname !== urlFor(id)) window.history.replaceState(null, "", urlFor(id));
+  if (location.pathname !== urlFor(id)) navReplace(urlFor(id));
   showEmpty();
 }
 
@@ -2218,7 +2239,7 @@ async function openNoteLink(repo: string, path: string, fragment: string | null)
 /** Go to an /app URL (path, query, #heading) like the sidebar does; the same note only scrolls to the heading. */
 function goTo(url: string) {
   const before = session;
-  if (location.pathname + location.search + location.hash !== url) window.history.pushState(null, "", url);
+  if (location.pathname + location.search + location.hash !== url) pushPlace(url);
   void route();
   const hash = new URL(url, location.href).hash;
   if (before && session === before && hash) before.scrollToHeading(decodeHash(hash));
@@ -2264,7 +2285,11 @@ interface Carry {
 let pendingCarry: Carry | null = null;
 
 function openFile(repo: string, path: string) {
-  if (session && session.repo === repo && session.path === path && !session.ended) return;
+  if (session && session.repo === repo && session.path === path && !session.ended) {
+    const spot = takeSpot(repo, path);
+    if (spot) session.restore(spot);
+    return;
+  }
   closeSession();
   current = { repo, path };
   setWorkspace(repo);
@@ -2279,7 +2304,7 @@ function openFile(repo: string, path: string) {
   renderTree();
   const carry = pendingCarry?.repo === repo && pendingCarry.path === path ? pendingCarry : null;
   pendingCarry = null;
-  session = new Session(repo, path, carry);
+  session = new Session(repo, path, carry, takeSpot(repo, path));
   history.setTarget({ repo, path, readOnly: isRepoReadOnly(repo) });
   renderHeader();
 }
@@ -2295,6 +2320,34 @@ function closeSession() {
   s?.destroy();
 }
 
+/** Where Back / Forward returned to: its scroll and caret, for the note's session (see nav.ts). */
+let pendingSpot: Spot | null = null;
+
+/** The open note's place: its URL, scroll and caret (kept as Back / Forward leave it). */
+function spotHere(): Spot | null {
+  if (!session) return null;
+  return { path: urlFor(session.repo, session.path), scroll: docBody.scrollTop, sel: session.selection() };
+}
+
+/** Going somewhere new (a note, a workspace): `url` after the current place in the tab's history. */
+function pushPlace(url: string) {
+  pendingSpot = null;
+  navPush(url, spotHere());
+}
+
+/** The spot waiting for the note `repo`/`path`, taken. */
+function takeSpot(repo: string, path: string): Spot | null {
+  const s = pendingSpot;
+  if (!s || s.path !== urlFor(repo, path)) return null;
+  pendingSpot = null;
+  return s;
+}
+
+function renderNav() {
+  backBtn.disabled = !canGoBack();
+  forwardBtn.disabled = !canGoForward();
+}
+
 /** The sidebar with no workspace open: a new one with an account; for a guest (who can't make one), the demo and
  *  sign-in instead. */
 function emptySidebar() {
@@ -2308,7 +2361,7 @@ function emptySidebar() {
 
 function navigateDemo() {
   demoRetried = null;
-  window.history.pushState(null, "", urlFor(DEMO_ID));
+  pushPlace(urlFor(DEMO_ID));
   void route();
 }
 
@@ -2494,6 +2547,8 @@ class Session {
     readonly repo: string,
     readonly path: string,
     private carry: Carry | null = null,
+    /** Come back to by Back / Forward: the scroll and caret it was left with, once the note shows. */
+    private spot: Spot | null = null,
   ) {
     this.localUser = localUser();
     // v2: a prefetched note (a hidden channel) has its engine syncing or synced already
@@ -2664,6 +2719,15 @@ class Session {
     clear(docBody, demoBanner(this.repo), host);
     this.previewEditor = mountEditor(host, { text, readOnly: true, images: repoImages(this.path, (p) => rawUrl(this.repo, p)), onLink: (t) => openLink(this, t) });
     docBody.scrollTop = scroll;
+    // back at a note: where it was left (the live editor keeps it)
+    const spot = this.spot;
+    if (spot) {
+      void this.previewEditor.ready.then(() => {
+        if (this.spot !== spot || !this.previewEditor) return;
+        if (spot.sel) this.previewEditor.select(spot.sel.anchor, spot.sel.head);
+        docBody.scrollTop = spot.scroll;
+      });
+    }
     void this.previewEditor.ready.then(() => this.markShown());
   }
 
@@ -2811,9 +2875,28 @@ class Session {
     }
     renderSaveStatus();
     // a link to a heading in this note (#fragment): once, when the note first shows
-    if (!this.hashDone && location.hash.length > 1) this.scrollToHeading(decodeHash(location.hash));
+    if (!this.hashDone && location.hash.length > 1 && !this.spot) this.scrollToHeading(decodeHash(location.hash));
     this.hashDone = true;
+    if (this.spot) this.restore(this.spot);
     this.markShown();
+  }
+
+  /** The note's caret and scroll as it was left (Back / Forward), once its editor is up. */
+  restore(spot: Spot) {
+    this.spot = spot;
+    const ed = this.editor;
+    if (!ed) return;
+    void ed.ready.then(() => {
+      if (this.spot !== spot || this.editor !== ed || this.ended) return;
+      this.spot = null;
+      if (spot.sel) ed.select(spot.sel.anchor, spot.sel.head);
+      docBody.scrollTop = spot.scroll;
+    });
+  }
+
+  /** The caret and selection (raw offsets) in the editor or the preview, if one is up. */
+  selection() {
+    return this.editor?.selection() ?? this.previewEditor?.selection() ?? null;
   }
 
   private hashDone = false;

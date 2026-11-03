@@ -1531,6 +1531,33 @@ input[type="radio"] {
   height: var(--header-h);
   padding: 0 12px 0 24px;
 }
+/* Back and forward (‹ ›), left of the breadcrumb */
+.nav-btns {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  margin-left: -8px;
+}
+.nav-btn {
+  width: 26px;
+  height: 26px;
+  color: var(--ink);
+}
+.nav-btn .chev {
+  width: 7px;
+  height: 7px;
+  margin: 0 2px 0 0;
+}
+.nav-btn .chev-left {
+  margin: 0 0 0 2px;
+  transform: rotate(135deg);
+}
+.nav-btn:disabled {
+  color: var(--muted);
+  opacity: 0.4;
+  background: transparent;
+  cursor: default;
+}
 .spacer {
   flex: 1;
 }
@@ -2502,6 +2529,9 @@ input[type="radio"] {
   .doc-header {
     gap: 8px;
     padding: 0 8px 0 12px;
+  }
+  .nav-btns {
+    margin-left: 0;
   }
   .participants,
   .doc-source {
