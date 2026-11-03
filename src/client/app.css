@@ -2189,8 +2189,7 @@ input[type="radio"] {
     border-radius: 0;
   }
 }
-/* "Share with an agent": two sections (this workspace; all of them over MCP), each a heading, a line, a
-   monospace field with its own Copy and a Copy prompt button; a hairline between them */
+/* "Share with an agent": "This workspace", a line and Copy prompt (Account → Tokens… shares its frame) */
 .share-modal {
   width: min(520px, calc(100vw - 32px));
 }
@@ -2202,11 +2201,6 @@ input[type="radio"] {
   flex-direction: column;
   gap: 8px;
 }
-.share-sec + .share-sec {
-  margin-top: 18px;
-  padding-top: 18px;
-  border-top: 1px solid var(--line-soft);
-}
 .share-sec h3 {
   margin: 0;
   color: var(--ink);
@@ -2214,53 +2208,6 @@ input[type="radio"] {
 }
 .share-sec .hint {
   margin: 0 0 4px;
-}
-.share-code {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 4px 4px 4px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--paper-2);
-}
-.share-code-text {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ink);
-  font: 400 12.5px/1.5 var(--font-mono);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.share-code-wrap {
-  align-items: flex-start;
-}
-.share-code-wrap .share-code-text {
-  padding-top: 2px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.share-code-copy {
-  flex: none;
-  height: 24px;
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--paper);
-  color: var(--ink-2);
-  cursor: pointer;
-  font: 550 12px/1 var(--font-ui);
-}
-.share-code-copy:hover:not(:disabled) {
-  color: var(--ink);
-  border-color: rgba(24, 24, 27, 0.18);
-}
-.share-code-copy:disabled {
-  color: var(--muted);
-  cursor: default;
-  opacity: 0.7;
 }
 .share-btns {
   display: flex;
@@ -2271,28 +2218,40 @@ input[type="radio"] {
 .share-btns .btn {
   min-width: 112px;
 }
-.share-snippets {
-  margin-top: 4px;
-  font-size: 13px;
+.tokens-modal .share-body > .hint {
+  margin: 0 0 12px;
 }
-.share-snippets summary {
-  width: fit-content;
-  color: var(--ink-2);
-  cursor: pointer;
-  font-weight: 550;
-}
-.share-snippets summary:hover {
-  color: var(--ink);
-}
-.share-snippet {
+.token-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-.share-snippet-head {
-  color: var(--muted);
-  font-size: 12.5px;
+.token-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-soft);
+}
+.token-row:last-child {
+  border-bottom: 1px solid var(--line-soft);
+}
+.token-text {
+  flex: 1;
+  min-width: 0;
+}
+.token-label {
+  overflow: hidden;
+  color: var(--ink);
+  font: 550 13px/1.4 var(--font-ui);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.token-text .hint {
+  margin: 0;
+  font-size: 12px;
 }
 .share-modal .modal-actions {
   margin-top: 20px;

@@ -12,7 +12,7 @@ import { anonIdentity, setAnonName, signInDialog, signInDirect, type AnonIdentit
 import { renderScratch } from "./scratch.ts";
 import { HistoryPanel } from "./history.ts";
 
-import { confirmDialog, copyText, deleteAccountDialog, promptDialog, shareDialog, welcomeDialog } from "./dialogs.ts";
+import { confirmDialog, copyText, deleteAccountDialog, promptDialog, shareDialog, tokensDialog, welcomeDialog } from "./dialogs.ts";
 import { openFileSearch } from "./filesearch.ts";
 import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetAllRemotes, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { demoResetPhrase } from "../shared/demo.ts";
@@ -539,6 +539,7 @@ function openAccountMenu() {
   showMenu(accountBtn, [
     myEmail() ? { section: myEmail() } : null,
     { label: "Change name…", run: changeName },
+    { label: "Tokens…", run: openTokens },
     { label: "Sign out", run: logout },
     "sep",
     { label: "Delete account…", danger: true, run: deleteAccount },
@@ -586,11 +587,37 @@ function switchWorkspace(id: string) {
   void route();
 }
 
-/** The sidebar card's Share: the "Share with an agent" dialog, with the open folder's URL (also the agents' address). */
+/** The agent prompts' tokens this page made, by account and workspace: one each per session, not one per click. */
+const agentTokens = new Map<string, Promise<string>>();
+
+/** The sidebar card's Share: the "Share with an agent" dialog, its prompt with the open folder's URL and, signed in, a token. */
 function openShareDialog() {
   const ws = repoById(wsId);
   if (!ws) return;
-  shareDialog({ url: location.origin + urlFor(ws.id), noSignIn });
+  const key = `${me.id}\n${ws.id}`;
+  const token = signedIn && !noSignIn
+    ? () => {
+        let t = agentTokens.get(key);
+        if (!t) {
+          t = api.agentToken(ws.id).then((r) => r.token);
+          agentTokens.set(key, t);
+          t.catch(() => agentTokens.delete(key));
+        }
+        return t;
+      }
+    : null;
+  shareDialog({ url: location.origin + urlFor(ws.id), noSignIn, token });
+}
+
+/** Account → "Tokens…": my tokens, each with Revoke (a revoked agent prompt's token is made again on the next copy). */
+function openTokens() {
+  tokensDialog(
+    () => api.tokens().then((r) => r.tokens),
+    async (id) => {
+      await api.revokeToken(id);
+      agentTokens.clear();
+    },
+  );
 }
 
 /** "New…": create a folder on this server and open it. */

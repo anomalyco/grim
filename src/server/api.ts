@@ -10,7 +10,7 @@ import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github
 import { errStatus, isErr } from "./errors.ts";
 import type { Participant } from "./rooms.ts";
 import { googleLoginEnabled } from "./google.ts";
-import { appTokenInfo, revokeAppToken } from "./tokens.ts";
+import { appTokenInfo, createAppToken, listAppTokens, revokeAppToken } from "./tokens.ts";
 import { leave, listedRows, recordJoin } from "./workspaces.ts";
 import { createDemoRoomRow, DEMO_ID } from "./demo.ts";
 import { deleteAccount } from "./account.ts";
@@ -216,10 +216,23 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
     return json({ ok: true, deletedWorkspaces: workspaces.length - failed.length, failedWorkspaces: failed }, 200, { "set-cookie": (await endSession(db, req))[0]! });
   }
 
+  if (p === "/api/tokens" && m === "GET") return json({ tokens: await listAppTokens(db, user.id) });
   const tm = /^\/api\/tokens\/([^/]+)$/.exec(p);
   if (tm && m === "DELETE") {
     if (!(await revokeAppToken(db, user.id, decode(tm[1]!)))) throw new HttpError(404, "token not found");
     return json({ ok: true });
+  }
+
+  // "Share with an agent"'s Copy prompt: a new app token for me, put in the prompt (the client keeps it for the session
+  // and asks again only when it has none). It acts as me everywhere, like the Mac app's; revoked under Account.
+  if (dm && dm[2] === "agent-token" && m === "POST" && p === `/api/workspace/${dm[1]}/agent-token`) {
+    if (visitor) return fail(404, "sign-in is off on this server");
+    const id = decode(dm[1]!);
+    if (isDemoRoom(id)) return fail(404, "the demo has no agents");
+    const repo = await ctx.repos.get(id);
+    if (!repo) return fail(404, "workspace not found");
+    const t = await createAppToken(db, user.id, `Agent prompt · ${repo.title}`.slice(0, 120));
+    return json({ token: t.token, id: t.id }, 201);
   }
 
   if (p === "/api/workspaces" || p.startsWith("/api/workspaces/")) return workspaces(req, url, ctx, user);

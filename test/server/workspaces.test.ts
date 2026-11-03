@@ -143,12 +143,29 @@ describe("public folders", () => {
     expect((await api(owner.cookie, "GET", `/api/workspace/${ws}/members`)).status).toBe(404);
     expect((await api(owner.cookie, "POST", `/api/workspace/${ws}/members`, { email: "x@example.com" })).status).toBe(404);
     expect((await fetch(`${base}/api/workspace/${ws}/public`)).status).toBe(401);
-    expect((await api(owner.cookie, "GET", "/api/tokens")).status).toBe(404);
     expect((await api(owner.cookie, "GET", "/api/note-links/x")).status).toBe(404);
     // A `linkAccess` in the body is ignored: folders are public.
     const r = await api(owner.cookie, "POST", "/api/workspaces", { title: "WST Private?", linkAccess: "none" });
     expect(r.status).toBe(201);
     expect((await api((await person("Gone Other")).cookie, "GET", `/api/workspace/${r.data.id}/tree`)).status).toBe(200);
+  });
+
+  test("an agent prompt's token: made on request, listed, works on the workspace URL, revocable", async () => {
+    const owner = await person("Agent Tok");
+    const ws = await workspace(owner, "WST Agent Tok");
+    const r = await api(owner.cookie, "POST", `/api/workspace/${ws}/agent-token`);
+    expect(r.status).toBe(201);
+    expect(r.data.token).toMatch(/^gmt_/);
+    expect((await api("", "POST", `/api/workspace/${ws}/agent-token`, undefined, { origin: base })).status).toBe(401);
+    expect((await api(owner.cookie, "POST", "/api/workspace/nope-nope/agent-token")).status).toBe(404);
+    const list = (await api(owner.cookie, "GET", "/api/tokens")).data.tokens;
+    expect(list.find((t: any) => t.id === r.data.id)?.label).toBe("Agent prompt · WST Agent Tok");
+    expect(JSON.stringify(list)).not.toContain(r.data.token);
+    const post = (cmd: string) =>
+      fetch(`${base}/app/${ws}`, { method: "POST", headers: { authorization: `Bearer ${r.data.token}`, "content-type": "application/json" }, body: JSON.stringify({ command: cmd }) });
+    expect((await post("echo hi > agent-made.md")).status).toBe(200);
+    expect((await api(owner.cookie, "DELETE", `/api/tokens/${r.data.id}`)).data).toEqual({ ok: true });
+    expect((await post("ls")).status).toBe(401);
   });
 
   test("only whoever made a folder may remove it", async () => {

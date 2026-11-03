@@ -29,6 +29,15 @@ export async function appTokenInfo(db: Db, token: string): Promise<{ id: string;
   return db.get<{ id: string; label: string }>("SELECT id, label FROM app_tokens WHERE token_hash = ? AND revoked_at IS NULL", sha256(token));
 }
 
+/** The user's active tokens, newest first (the Account's "Agent tokens…"; never the secrets). */
+export async function listAppTokens(db: Db, userId: string): Promise<{ id: string; label: string; createdAt: number; lastUsedAt: number | null; mcp: boolean }[]> {
+  const rows = await db.all<{ id: string; label: string; created_at: number; last_used_at: number | null; audience: string | null }>(
+    "SELECT id, label, created_at, last_used_at, audience FROM app_tokens WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC",
+    userId,
+  );
+  return rows.map((r) => ({ id: r.id, label: r.label, createdAt: r.created_at, lastUsedAt: r.last_used_at, mcp: r.audience === MCP_AUDIENCE }));
+}
+
 /** Revoke one of the user's tokens. Returns false if they have no such active token. */
 export async function revokeAppToken(db: Db, userId: string, id: string): Promise<boolean> {
   const { changes } = await db.run("UPDATE app_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL", Date.now(), id, userId);

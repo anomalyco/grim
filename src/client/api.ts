@@ -44,6 +44,15 @@ export interface Workspace {
   guestCreate?: boolean;
 }
 
+/** A token's line in Account → Tokens… (GET /api/tokens): its label, when it was made and last used. */
+export interface TokenRow {
+  id: string;
+  label: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+  mcp: boolean;
+}
+
 /** What the switcher lists: a workspace, or the little a guest's browser remembers of one it opened. */
 export type WorkspaceItem = Pick<Workspace, "id" | "title" | "kind" | "readOnly">;
 
@@ -123,6 +132,11 @@ export const api = {
   logout: () => req<unknown>("POST", "/auth/logout"),
   deleteAccount: () => req<{ ok: true; deletedWorkspaces: number; failedWorkspaces: string[] }>("DELETE", "/api/me"),
   setName: (name: string) => req<{ name: string }>("PATCH", "/api/me", { name }),
+  /** My active tokens (Account → Tokens…), and revoking one. */
+  tokens: () => req<{ tokens: TokenRow[] }>("GET", "/api/tokens"),
+  revokeToken: (id: string) => req<{ ok: true }>("DELETE", `/api/tokens/${encodeURIComponent(id)}`),
+  /** A new app token for an agent's prompt in this workspace ("Agent prompt · <title>"): the secret, once. */
+  agentToken: (id: string) => req<{ token: string; id: string }>("POST", `${w(id)}/agent-token`),
 
   /** My workspaces on this server (every workspace, on a server without sign-in). */
   workspaces: () => req<Workspace[]>("GET", "/api/workspaces"),

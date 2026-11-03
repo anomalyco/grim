@@ -287,7 +287,7 @@ With sign-in off (the default) that's all: the app connects without signing in, 
 
 ### Agents
 
-A workspace's URL, `$PUBLIC_URL/app/<id>`, is also its address for agents: a browser gets the app, anything else (curl) the agent API. At the bottom of the sidebar, **Share with an agent → Share** opens a dialog whose **This workspace** section shows that URL and **Copy prompt** copies a ready-to-paste prompt with it. The agent must be able to reach `PUBLIC_URL`, so for an agent on another machine, use an address both can reach.
+A workspace's URL, `$PUBLIC_URL/app/<id>`, is also its address for agents: a browser gets the app, anything else (curl) the agent API. At the bottom of the sidebar, **Share with an agent → Share** opens a dialog whose **Copy prompt** copies a ready-to-paste prompt with it (and, signed in, a token that acts as you). The agent must be able to reach `PUBLIC_URL`, so for an agent on another machine, use an address both can reach.
 
 The same dialog's **All your workspaces (MCP)** section has the server's MCP URL, `$PUBLIC_URL/mcp`, a prompt asking an agent to add it to its MCP configuration, and opencode's config. Without sign-in, it needs none.
 
