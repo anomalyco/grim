@@ -63,12 +63,30 @@
     document.head.append(h('link', { rel: 'stylesheet', href: SCRIPT.src.replace(/\.js(\?.*)?$/, '.css$1'), 'data-grim-review': '' }));
   }
 
+  const bridge = () => window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.grim;
+
   // ---------- state (persisted per artifact) ----------
   const KEY = 'grim-review:' + location.origin + location.pathname;
   const fresh = () => ({ v: VERSION, anns: [], seq: 0, overall: '', answers: {}, checks: {}, viewed: {} });
   let state = fresh();
   try { Object.assign(state, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch {}
-  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} };
+  // kept in the page's storage, and by Grim when the page runs in its panel (whose storage lasts only while it runs)
+  let hostSaveTimer = null;
+  const save = () => {
+    state.t = Date.now();
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {}
+    if (!bridge()) return;
+    clearTimeout(hostSaveTimer);
+    hostSaveTimer = setTimeout(() => { try { bridge().postMessage(JSON.stringify({ type: 'save', state })); } catch {} }, 400);
+  };
+  // Grim's copy, if newer than the page's
+  function restore(s) {
+    if (!s || typeof s !== 'object' || !Array.isArray(s.anns) || (s.t || 0) <= (state.t || 0)) return;
+    state = Object.assign(fresh(), s);
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {}
+    emit();
+    document.dispatchEvent(new CustomEvent('grim-review-restored'));
+  }
   const undoStack = [];
   const listeners = new Set();
   const emit = () => listeners.forEach(f => f());
@@ -187,13 +205,14 @@
         this.layer.addEventListener('pointerup', up);
         return;
       }
-      this.layer.setPointerCapture(e.pointerId);
+      try { this.layer.setPointerCapture(e.pointerId); } catch {}
       const pts = [start];
       const w = ui.tool === 'hl' ? 16 : 2.5;
       const live = strokeEl(pts, ui.color, w, ui.tool);
       this.svg.append(live);
       const move = ev => {
-        for (const ce of (ev.getCoalescedEvents ? ev.getCoalescedEvents() : [ev])) {
+        const co = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [];
+        for (const ce of co.length ? co : [ev]) {
           const p = this.local(ce), l = pts[pts.length - 1];
           if (Math.hypot(p[0] - l[0], p[1] - l[1]) >= 1.5) pts.push(p);
         }
@@ -878,6 +897,7 @@
         const ta = h('textarea', { class: 'gn-answer', rows: 2, placeholder: 'Your answer (sent with the review)' });
         ta.value = state.answers[id]?.answer || '';
         ta.addEventListener('input', () => { state.answers[id] = { q: body.textContent.trim(), answer: ta.value }; save(); emit(); });
+        document.addEventListener('grim-review-restored', () => { ta.value = state.answers[id]?.answer || ''; });
         this.append(ta);
       }
     }
@@ -897,10 +917,16 @@
         cur.items = items.map(t => ({ text: t, checked: !!cur.items.find(x => x.text === t)?.checked }));
         state.checks[id] = cur;
         if (title) this.append(h('div', { class: 'gk-title', text: title }));
-        cur.items.forEach(it => {
+        const boxes = cur.items.map(it => {
           const cb = h('input', { type: 'checkbox' }); cb.checked = it.checked;
-          cb.addEventListener('change', () => { it.checked = cb.checked; save(); emit(); });
+          cb.addEventListener('change', () => { it.checked = cb.checked; state.checks[id] = cur; save(); emit(); });
           this.append(h('label', { class: 'gk-item' }, cb, h('span', { text: it.text })));
+          return cb;
+        });
+        document.addEventListener('grim-review-restored', () => {
+          const got = state.checks[id];
+          if (got) cur.items.forEach((it, i) => { it.checked = !!got.items.find(x => x.text === it.text)?.checked; boxes[i].checked = it.checked; });
+          state.checks[id] = cur;
         });
       });
     }
@@ -1109,7 +1135,6 @@
     return L.join('\n').trim() + '\n';
   }
 
-  const bridge = () => window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.grim;
   let sendTimer = null, pendingSend = null;
   async function send(filterIds) {
     if (ui.sending) return;
@@ -1266,6 +1291,7 @@
     else if (lightbox && !typing && e.key === 'ArrowRight') lightbox.nav(1);
   });
 
+  if (bridge()) try { bridge().postMessage(JSON.stringify({ type: 'load' })); } catch {}
   domReady().then(() => {
     document.documentElement.classList.add('gr-page');
     document.documentElement.dataset.grTool = ui.tool;
@@ -1283,7 +1309,7 @@
     version: VERSION, state: () => state, surfaces, ui,
     setAnnotating, setTool, setColor: c => { ui.color = c; renderBar(); }, undo,
     clear: () => mutate(() => state.anns = []),
-    buildPayload, send, hostResult, hostPick, toMarkdown, toast,
+    buildPayload, send, hostResult, hostPick, restore, toMarkdown, toast,
     parsePatch, diffLines, lastPayload: null,
   };
 })();

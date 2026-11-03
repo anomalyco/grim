@@ -32,7 +32,8 @@ async function open(width, opts = {}) {
   page.on("console", m => { if (m.type() === "error") errors.push(m.text()); });
   if (opts.host) await page.addInitScript(() => {
     window.__posted = [];
-    window.webkit = { messageHandlers: { grim: { postMessage: m => { window.__posted.push(JSON.parse(m)); } } } };
+    window.__all = [];
+    window.webkit = { messageHandlers: { grim: { postMessage: m => { const v = JSON.parse(m); window.__all.push(v); if (v.type === "review") window.__posted.push(v); } } } };
   });
   await page.goto(url);
   await page.waitForFunction(() => document.querySelectorAll("grim-diff-stack .gs-item").length === 6 && document.querySelectorAll(".gi-frame img").length >= 3);
@@ -238,6 +239,9 @@ async function open(width, opts = {}) {
   await page.evaluate(() => scrollBy(0, 150));
   const r = await wr.boundingBox();
   await page.mouse.move(r.x + 40, r.y + 10); await page.mouse.down(); await page.mouse.move(r.x + 300, r.y + 12, { steps: 5 }); await page.mouse.up();
+  ok(await page.evaluate(() => window.__all[0].type === "load"), "asks Grim for its saved copy at start");
+  await page.waitForFunction(() => window.__all.some(m => m.type === "save" && m.state.anns.length === 1));
+  ok(true, "saves to Grim after a change (debounced)");
   await page.click(".gr-tb-send");
   await page.waitForFunction(() => window.__posted.length === 1);
   const m = await page.evaluate(() => window.__posted[0]);
@@ -253,6 +257,10 @@ async function open(width, opts = {}) {
   ok((await page.evaluate(() => grimReview.state().anns.length)) === 0, "hostResult ok clears sent annotations");
   ok(/Review sent to Share links/.test(await page.locator(".gr-toast").textContent()), "toast names the session");
   await page.screenshot({ path: join(shots, "13-sent.png") });
+  // Grim's newer copy wins (the panel's storage doesn't outlive the app)
+  await page.evaluate(() => grimReview.restore({ anns: [{ id: "r1", s: "diff:wrangler.toml", type: "comment", a: "n3", x: 200, y: 8, n: 9, color: "#296d9a", text: "kept by Grim" }], seq: 9, overall: "", answers: { "q-expiry": { q: "?", answer: "never" } }, checks: {}, viewed: {}, t: Date.now() + 1000 }));
+  ok((await page.locator('grim-diff[file="wrangler.toml"] .gr-pin').count()) === 1, "restore() brings Grim's copy back");
+  ok((await page.inputValue("grim-note.gn-question .gn-answer")) === "never", "restored answers show");
   ok(errors.length === 0, "no page errors: " + errors.join(" | "));
   await ctx.close();
 }
