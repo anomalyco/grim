@@ -4,6 +4,7 @@
 // mode (the header's toggle): only Alice's own edits since it was turned on are tinted; an agent's edit or rewrite
 // isn't; undo ends a highlight; a reload keeps it; off clears it; on again starts fresh.
 // Usage: bun run build:client && bun test/e2e/review.mjs   (screenshots in /tmp/opencode/review/)
+// Against a hosted server: BASE_URL=<url> COOKIE='np_session=…' (a signed-in account; no dev login there).
 // Needs playwright-core in /tmp/opencode/pw and the Playwright Chromium headless shell.
 import "../local-storage.ts";
 import { chromium } from "/tmp/opencode/pw/node_modules/playwright-core/index.mjs";
@@ -12,7 +13,35 @@ import { startTarget } from "./target.mjs";
 
 const SHOTS = process.env.SHOTS || "/tmp/opencode/review";
 mkdirSync(SHOTS, { recursive: true });
-const T = await startTarget({ env: { QUIET_MS: "1500" } });
+const COOKIE = process.env.COOKIE;
+const T = COOKIE ? hosted(process.env.BASE_URL.replace(/\/$/, "")) : await startTarget({ env: { QUIET_MS: "1500" } });
+/** A hosted server, signed in with COOKIE: history through the API, the agent with a workspace agent token. */
+function hosted(base) {
+  const api = async (method, path, body) => {
+    const r = await fetch(base + path, { method, headers: { cookie: COOKIE, origin: base, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    if (!r.ok) throw new Error(`${method} ${path}: ${r.status}`);
+    return r.status === 204 ? null : r.json();
+  };
+  return {
+    base,
+    ws: null,
+    appPath: "/app",
+    hosted: true,
+    async history(ws, path, limit) {
+      return api("GET", `/api/workspace/${ws}/history?limit=${limit}&path=${encodeURIComponent(path)}`);
+    },
+    async save(ws, path) {
+      await agent(`save ${path}`);
+    },
+    api,
+    async stop() {
+      await api("DELETE", `/api/workspace/${WS}`).catch(() => {});
+    },
+  };
+}
+let agentToken = null;
+/** The server's quiet period before it commits. */
+const QUIET = COOKIE ? 3000 : 1500;
 const base = T.base;
 let WS = T.ws;
 const NOTE = "Undo.md";
@@ -33,10 +62,16 @@ await ctx.addInitScript((ws) => (globalThis.WS = ws), WS);
 const page = await ctx.newPage();
 page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
 page.on("console", (m) => m.type() === "error" && console.log("CONSOLE", m.text()));
-await page.goto(`${base}/auth/dev?next=${T.appPath}`);
-await page.fill("input[name=name]", "Alice");
-await page.click("form button[type=submit], form button");
-await page.waitForURL(/\/app\//, { timeout: 10000 });
+if (COOKIE) {
+  const [name, value] = COOKIE.split(/=(.*)/);
+  await ctx.addCookies([{ name, value, url: base }]);
+  await page.goto(`${base}/app`);
+} else {
+  await page.goto(`${base}/auth/dev?next=${T.appPath}`);
+  await page.fill("input[name=name]", "Alice");
+  await page.click("form button[type=submit], form button");
+  await page.waitForURL(/\/app\//, { timeout: 10000 });
+}
 // a workspace of Alice's own (Bun's default notebook may not exist)
 WS = await page.evaluate(async () => (await (await fetch("/api/workspaces", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "Review" }) })).json()).id);
 const created = await page.evaluate(async ([ws, note]) => {
@@ -44,11 +79,12 @@ const created = await page.evaluate(async ([ws, note]) => {
   return r.status;
 }, [WS, NOTE]);
 check("note created", created === 201 || created === 200, String(created));
+if (T.hosted) agentToken = (await T.api("POST", `/api/workspace/${WS}/agent-token`)).token;
 await T.save(WS, NOTE);
 
 /** An agent's command on the workspace URL. */
 async function agent(command) {
-  const r = await fetch(`${base}/app/${WS}`, { method: "POST", body: command });
+  const r = await fetch(`${base}/app/${WS}`, { method: "POST", body: command, headers: agentToken ? { authorization: `Bearer ${agentToken}` } : {} });
   const out = r.ok ? await r.json() : null;
   if (!out || out.exitCode !== 0) throw new Error(`agent \`${command}\`: ${JSON.stringify(out)}`);
 }
@@ -108,7 +144,7 @@ check("undo: the agent's at once", (await waitName("The agent's line.", "Agent",
 const after = await namesOver("The agent's line.", 2200);
 check("…and stays the agent's after the server's next message (no flicker)", JSON.stringify(after) === JSON.stringify(["Agent"]), JSON.stringify(after));
 await page.screenshot({ path: `${SHOTS}/2-undone.png` });
-await sleep(1500);
+await sleep(QUIET + 500);
 check("the delayed save after the undo makes no commit", (await commits()) === before, `${before} → ${await commits()}`);
 await page.keyboard.press(`${MOD}+Shift+z`);
 check("redo: Alice's again", (await waitName("Alice adds", "Alice", 500)) === "Alice", JSON.stringify(await marks()));
@@ -128,11 +164,11 @@ check("…and stays (server agrees)", JSON.stringify(await namesOver("The agent'
 // saved with Alice's words, then undone: the agent's commit
 await endOf("The agent's line.");
 await page.keyboard.type(" saved");
-await sleep(2600);
+await sleep(QUIET + 1500);
 const saved = await commits();
 check("Alice's words saved", saved === before + 1, `${before} → ${saved}`);
 await page.keyboard.press(`${MOD}+z`);
-await sleep(2600);
+await sleep(QUIET + 1500);
 const hist = await T.history(WS, NOTE, 5);
 console.log("     last commit:", JSON.stringify(hist[0]));
 check("undo after a save: one more commit, the agent's (Git blame stays the agent's)", hist.length === saved + 1 && /agents\.grimoire/i.test(JSON.stringify(hist[0])), JSON.stringify(hist[0]));
@@ -194,7 +230,7 @@ check("undo of Alice's edit: its highlight goes", got.length === 0, JSON.stringi
 await page.keyboard.press(`${MOD}+Shift+z`);
 got = await waitTinted(["Alice's first line again"], 800);
 check("redo: highlighted again", JSON.stringify(got) === JSON.stringify(["Alice's first line again"]), JSON.stringify(got));
-await sleep(2500);
+await sleep(QUIET + 1000);
 await page.reload();
 await page.waitForFunction(() => !!document.querySelector(".mde")?.mdeView?.collab?.blame, null, { timeout: 10000 });
 got = await waitTinted(["Alice's first line again"], 4000);
