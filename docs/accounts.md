@@ -44,7 +44,9 @@ and commit authors still tell people apart. A new server starts empty ("Start a 
   - On the Mac they live in the Keychain only: a generic password, service "Grimoire", account = the server's origin,
     accessible after first unlock on this device only. They never go in files, logs, URLs or caches.
   - A token unused for 90 days stops working; using it keeps it alive. A 401 drops it, and the app shows signed out.
-  - `DELETE /api/tokens/:id` revokes one.
+  - **Share with an agent**'s Copy prompt (web and Mac) makes one more: `POST /api/workspace/:id/agent-token`, an app
+    token labelled "Agent prompt · <workspace>", put in the prompt (one per account and workspace per session).
+  - `GET /api/tokens` lists the active ones (web: **Account → Tokens…**); `DELETE /api/tokens/:id` revokes one.
 - **MCP clients** (Claude, Cursor, opencode… at `/mcp`) sign in with OAuth (`docs/README.md`, "MCP"): the browser
   goes through the usual Google sign-in, then a consent page ("Allow <client> to access your Grim workspaces?", the
   client's name, where it sends you back to, "Signed in as <email>"; only Allow issues a code). Clients register
@@ -52,7 +54,7 @@ and commit authors still tell people apart. A new server starts empty ("Start a 
   Mac app's fixed loopback rule; the server only redirects to a registered one. The client gets an app token
   labelled "<client> (MCP)", hashed, 90 days idle, **bound to `/mcp`** (the API and sockets refuse it). Signing out
   or switching accounts in the web app doesn't touch MCP tokens; to disconnect a client, revoke its token
-  (`DELETE /api/tokens/:id`, or `revoked_at` in `app_tokens`; there's no screen yet).
+  (web: **Account → Tokens…**; `DELETE /api/tokens/:id`, or `revoked_at` in `app_tokens`).
 
 ## Workspaces and accounts
 

@@ -38,7 +38,7 @@ Grim is a notepad for people and agents. This is a playground: **anyone in it ca
 Agents edit the same notes as people, through a bash shell over the workspace, and you see their cursor as they write.
 
 ### Share with an agent
-Signed in, the **Share with an agent** card at the bottom of the sidebar has a **Share** button. Its **Copy prompt** copies a prompt with the open workspace's URL; paste it to your agent (Claude, Codex, …). The same URL people open is the agent's way in:
+Signed in, the **Share with an agent** card at the bottom of the sidebar has a **Share** button. Its **Copy prompt** copies a prompt with the open workspace's URL and a token that acts as you (revoke it under Account → Tokens…); paste it to your agent (Claude, Codex, …). The same URL people open is the agent's way in:
 
 - a GET returns instructions
 - each POST runs a shell command (\`ls\`, \`cat\`, \`grep\`, \`echo … >> note.md\`, \`git log\`)

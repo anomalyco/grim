@@ -1,7 +1,7 @@
 // Modal dialogs: prompt, confirm, add a GitHub repo; the agent prompt and copying text.
-import { api, type ServerInfo, type Workspace } from "./api.ts";
+import { api, type ServerInfo, type TokenRow, type Workspace } from "./api.ts";
 import { parseGitHubRepo } from "../shared/github.ts";
-import { errorMessage, h, pickNote, toast } from "./util.ts";
+import { clear, errorMessage, h, pickNote, toast } from "./util.ts";
 
 /** `backdrop: false`: a click outside doesn't close it (only its own buttons and Escape do). */
 export function modal(title: string, body: HTMLElement, opts: { wide?: boolean; backdrop?: boolean; className?: string } = {}) {
@@ -236,33 +236,46 @@ export function gitHubForm(server: ServerInfo, hooks: AddGitHubHooks, host: Dial
 }
 
 
-/** The ready-to-paste instructions for an agent, with the workspace's URL (the native app's, word for word). */
-export function agentPrompt(url: string, noSignIn: boolean) {
-  const guest = noSignIn ? "" : " Without a token you can edit existing notes, but not create, rename or delete them; for full access, use Grim's MCP server.";
-  return `Work in this Grim workspace: ${url}\nGET that URL (plain HTTP, e.g. curl) for instructions, then POST shell commands to the same URL to read and edit its Markdown notes.${guest}`;
+/**
+ * The ready-to-paste instructions for an agent, with the workspace's URL (the native app's, word for word). `token`: an
+ * app token of mine (full access, as me); null: a guest's prompt (edits existing notes only) unless `noSignIn`.
+ */
+export function agentPrompt(url: string, token: string | null, noSignIn: boolean) {
+  const auth = token
+    ? `Send this header on every request: Authorization: Bearer ${token}\n`
+    : noSignIn
+      ? ""
+      : "Without a token you can only edit existing notes: not create, rename or delete them.\n";
+  return `Work in this Grim workspace: ${url}\nUse plain HTTP (e.g. curl). GET that URL for instructions, then POST shell commands to it to read and edit its Markdown notes.\n${auth}Also send X-Agent-Session-Id: <your session id> if you have one.`;
 }
 
-/** The MCP section's prompt: add the server's `/mcp` to the agent's MCP configuration (the native app's, word for word). */
-export function mcpPrompt(mcpUrl: string, noSignIn: boolean) {
-  const auth = noSignIn ? "no sign-in needed on this server" : "it signs in with OAuth in the browser the first time";
-  return `Add the Grim MCP server to your MCP configuration: URL ${mcpUrl} (Streamable HTTP; ${auth}). Then use its list_workspaces, command and changes tools to work in my Grim workspaces.`;
-}
-
-/** The "opencode config" disclosure: opencode's MCP config (docs/README.md, "Connect an MCP client"). */
-export function mcpSnippets(mcpUrl: string, noSignIn: boolean): { name: string; where: string; code: string }[] {
-  return [
-    { name: "opencode", where: noSignIn ? "In opencode.json:" : "In opencode.json, then opencode mcp auth grim:", code: `{"mcp": {"grim": {"type": "remote", "url": "${mcpUrl}"}}}` },
-  ];
-}
-
-/** A button that copies `text()` and says "Copied" for a moment (`small`: the one inside a code field). */
-function copyButton(label: string, text: () => string | null, cls = "btn"): HTMLButtonElement {
+/** A button that copies `text()` and says "Copied" for a moment; a promise (a token being made) says "Copying…" meanwhile. */
+function copyButton(label: string, text: () => string | null | Promise<string | null>, cls = "btn"): HTMLButtonElement {
   const b: HTMLButtonElement = h("button", { type: "button", class: cls, onclick: () => void go() }, label);
   let timer = 0;
   async function go() {
+    if (b.disabled) return;
     const t = text();
-    if (!t) return;
-    if (!(await copyText(t))) return toast("Couldn't copy to the clipboard. Try again.", "error");
+    let ok: boolean;
+    if (typeof t === "string" || t === null) {
+      if (!t) return;
+      ok = await copyText(t);
+    } else {
+      b.disabled = true;
+      b.textContent = "Copying…";
+      try {
+        ok = await copyLater(t);
+      } catch (err) {
+        b.textContent = label;
+        return toast(errorMessage(err), "error");
+      } finally {
+        b.disabled = false;
+      }
+    }
+    if (!ok) {
+      b.textContent = label;
+      return toast("Couldn't copy to the clipboard. Try again.", "error");
+    }
     b.textContent = "Copied";
     clearTimeout(timer);
     timer = window.setTimeout(() => (b.textContent = label), 1500);
@@ -270,52 +283,84 @@ function copyButton(label: string, text: () => string | null, cls = "btn"): HTML
   return b;
 }
 
-/** A value in a monospace field with its own small Copy (`wrap`: long snippets wrap instead of scrolling). */
-function codeField(value: string, wrap = false) {
-  const code = h("code", { class: "share-code-text" }, value);
-  const copy = copyButton("Copy", () => code.textContent || null, "share-code-copy");
-  return { el: h("div", { class: `share-code${wrap ? " share-code-wrap" : ""}` }, code, copy), code, copy };
+/**
+ * Copy text that's still on its way. Safari only copies within the click, so the clipboard gets a ClipboardItem with
+ * the promise at once; elsewhere (or if that fails) it waits and copies. A failed `text` throws.
+ */
+async function copyLater(text: Promise<string | null>): Promise<boolean> {
+  if (window.isSecureContext && navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+    const blob = text.then((t) => new Blob([t ?? ""], { type: "text/plain" }));
+    blob.catch(() => {});
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
+      return true;
+    } catch {
+      // fall through (a failed `text` throws below)
+    }
+  }
+  const t = await text;
+  return !!t && copyText(t);
 }
 
 /**
- * "Share with an agent" (the sidebar card's Share): this workspace's URL (the agents' address too: GET for
- * instructions, POST commands) and its prompt, then the account's MCP server (`$PUBLIC_URL/mcp`) with its prompt, URL
- * and opencode's config. The native app's dialog matches it.
+ * "Share with an agent" (the sidebar card's Share): "This workspace" with only Copy prompt. Signed in, the prompt carries
+ * an app token of mine (`token()`: made on the first copy, kept for the session), so the agent can do everything I can.
+ * The native app's dialog matches it.
  */
-export function shareDialog(opts: { url: string; noSignIn: boolean }) {
-  const mcpUrl = new URL("/mcp", opts.url).href;
-  const linkField = codeField(opts.url);
-  const promptBtn = copyButton("Copy prompt", () => agentPrompt(opts.url, opts.noSignIn));
-
-  const mcpField = codeField(mcpUrl);
-  const snippets = mcpSnippets(mcpUrl, opts.noSignIn).map((s) => ({ ...s, field: codeField(s.code, true) }));
-  const sec = (key: string, title: string, ...kids: HTMLElement[]) =>
-    h("section", { class: "share-sec", "aria-labelledby": `share-${key}` }, h("h3", { id: `share-${key}` }, title), ...kids);
+export function shareDialog(opts: { url: string; noSignIn: boolean; token: (() => Promise<string>) | null }) {
+  const promptBtn = copyButton("Copy prompt", () =>
+    opts.token ? opts.token().then((t) => agentPrompt(opts.url, t, opts.noSignIn)) : agentPrompt(opts.url, null, opts.noSignIn),
+  );
+  const hint = opts.token
+    ? "Give this prompt to an agent (Claude, Codex, opencode…) to work in this workspace over plain HTTP. The prompt contains a token that acts as you. Revoke it under Account."
+    : opts.noSignIn
+      ? "Give this prompt to an agent (Claude, Codex, opencode…) to work in this workspace over plain HTTP."
+      : "Give this prompt to an agent (Claude, Codex, opencode…) to work in this workspace over plain HTTP. Signed out, it can only edit existing notes.";
   const body = h("div", { class: "modal-body share-body" },
-    sec("ws", "This workspace",
-      h("p", { class: "hint" },
-        opts.noSignIn
-          ? "Give this prompt to an agent. It works with this workspace at its URL over plain HTTP (no setup): it GETs the URL for instructions and POSTs commands to it."
-          : "Give this prompt to an agent. It works with this workspace at its URL over plain HTTP (no setup). Without a token it can read and edit existing notes; for full access, use MCP (below)."),
-      linkField.el,
+    h("section", { class: "share-sec", "aria-labelledby": "share-ws" },
+      h("h3", { id: "share-ws" }, "This workspace"),
+      h("p", { class: "hint" }, hint),
       h("div", { class: "share-btns" }, promptBtn),
-    ),
-    sec("mcp", "All your workspaces (MCP)",
-      h("p", { class: "hint" },
-        opts.noSignIn
-          ? "Add Grim as an MCP server in your agent or tool (Claude, Cursor, opencode…). It can work with all the workspaces on this server; no sign-in needed on this server."
-          : "Add Grim as an MCP server in your agent or tool (Claude, Cursor, opencode…). It can work with all your workspaces, and signs in with your Grim account the first time."),
-      mcpField.el,
-      h("div", { class: "share-btns" }, copyButton("Copy prompt", () => mcpPrompt(mcpUrl, opts.noSignIn))),
-      h("details", { class: "share-snippets" },
-        h("summary", null, "opencode config"),
-        ...snippets.map((s) => h("div", { class: "share-snippet" }, h("div", { class: "share-snippet-head" }, s.where), s.field.el)),
-      ),
     ),
     h("div", { class: "modal-actions" }, h("button", { type: "button", class: "btn btn-primary", onclick: () => dlg.close() }, "Done")),
   );
   const dlg = modal("Share with an agent", body, { className: "share-modal" });
   promptBtn.focus();
+  return dlg;
+}
+
+/**
+ * Account → "Tokens…": my active tokens (agent prompts', the Mac app's, MCP clients'), each with Revoke.
+ */
+export function tokensDialog(load: () => Promise<TokenRow[]>, revoke: (id: string) => Promise<void>) {
+  const list = h("ul", { class: "token-list" }, h("li", { class: "hint" }, "Loading…"));
+  const body = h("div", { class: "modal-body share-body" },
+    h("p", { class: "hint" }, "Tokens act as you: whoever has one can do anything you can. Revoke any you no longer use."),
+    list,
+    h("div", { class: "modal-actions" }, h("button", { type: "button", class: "btn btn-primary", onclick: () => dlg.close() }, "Done")),
+  );
+  const dlg = modal("Tokens", body, { className: "share-modal tokens-modal" });
+  const day = (t: number) => new Date(t).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  const render = (rows: TokenRow[]) => {
+    if (!rows.length) return clear(list, h("li", { class: "hint" }, "No tokens."));
+    clear(list, ...rows.map((r) => {
+      const btn: HTMLButtonElement = h("button", { type: "button", class: "btn btn-small", onclick: async () => {
+        btn.disabled = true;
+        try {
+          await revoke(r.id);
+          li.remove();
+          if (!list.children.length) render([]);
+        } catch (err) {
+          btn.disabled = false;
+          toast(errorMessage(err), "error");
+        }
+      } }, "Revoke");
+      const when = `Made ${day(r.createdAt)}${r.lastUsedAt ? ` · last used ${day(r.lastUsedAt)}` : " · never used"}${r.mcp ? " · MCP" : ""}`;
+      const li = h("li", { class: "token-row" }, h("div", { class: "token-text" }, h("div", { class: "token-label" }, r.label), h("div", { class: "hint" }, when)), btn);
+      return li;
+    }));
+  };
+  load().then(render, (err) => clear(list, h("li", { class: "hint" }, errorMessage(err))));
   return dlg;
 }
 
