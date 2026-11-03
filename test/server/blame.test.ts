@@ -154,7 +154,12 @@ describe("agent sessions: names and the note's origin", () => {
     expect(blames(c).at(-1)?.origin).toBeUndefined();
     a.ensureBlame();
     await waitFor(() => blames(c).at(-1)?.origin === "agent");
-    a.destroy(true);
+    // woken from its crash log (a Durable Object's channel open or an agent's RPC, which may never call ensureBlame):
+    // the saved origin is there at once
+    a.destroy(false);
+    const woken = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() }).wake("org", "agent.md", "main");
+    expect(woken?.blame().origin).toBe("agent");
+    woken?.destroy(true);
     p.destroy(true);
   });
 });

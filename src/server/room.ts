@@ -316,7 +316,7 @@ export class Room {
   /**
    * Restore the room from its crash log, synchronously and with nothing but the room storage (no store, no Db): the
    * document, base, inBase, dirty, savedAt, generation, contributors, line authors and the resolved origin authors
-   * (from the blame cache). For a Durable Object waking from hibernation; open() uses it too. Call it once, on a
+   * (from the blame cache) and the note's saved origin. For a Durable Object waking from hibernation; open() uses it too. Call it once, on a
    * new room. Returns false (and changes nothing) when there is no crash log. If the blame cache missed,
    * `ensureBlame()` fetches it later.
    */
@@ -346,6 +346,8 @@ export class Room {
     this.savedAt = state?.savedAt ?? null;
     this.contributors = new Map((state?.contributors ?? []).map((c) => [c.id, c]));
     this.originAuthors = this.originCommit === null ? { authors: [], lines: [] } : this.cachedBlame(this.originCommit);
+    // who created the note, if known: every wake path (some never call ensureBlame) sends it with the first blame
+    this.loadSavedOrigin();
     this.dirty = this.isDirty();
     return true;
   }
@@ -501,17 +503,10 @@ export class Room {
    */
   private loadOrigin() {
     if (this.noteOrigin || this.originLoading || this.closed) return;
-    if (!this.ephemeral) {
-      try {
-        const bytes = this.storage.getBlob(this.originKey());
-        const saved = bytes ? (JSON.parse(new TextDecoder().decode(bytes)) as { origin?: unknown }) : null;
-        if (saved?.origin === "agent" || saved?.origin === "human") {
-          this.noteOrigin = saved.origin;
-          // a woken room already sent its cached blame to the first connection, without the origin
-          this.scheduleBlame(0);
-          return;
-        }
-      } catch {}
+    if (this.loadSavedOrigin()) {
+      // a room woken without it already sent its cached blame, without the origin
+      this.scheduleBlame(0);
+      return;
     }
     // in Git (the room opened from it, or has committed): its first commit on the branch (Code Storage lists commits by
     // branch only, not from a commit)
@@ -529,6 +524,20 @@ export class Room {
         (e: unknown) => console.error(`[room ${this.key}] first author failed:`, e),
       )
       .finally(() => (this.originLoading = false));
+  }
+
+  /** The note's origin from the room storage (no store call: wake() uses it too); false if none is saved. */
+  private loadSavedOrigin(): boolean {
+    if (this.ephemeral) return false;
+    try {
+      const bytes = this.storage.getBlob(this.originKey());
+      const saved = bytes ? (JSON.parse(new TextDecoder().decode(bytes)) as { origin?: unknown }) : null;
+      if (saved?.origin === "agent" || saved?.origin === "human") {
+        this.noteOrigin = saved.origin;
+        return true;
+      }
+    } catch {}
+    return false;
   }
 
   private originKey() {
