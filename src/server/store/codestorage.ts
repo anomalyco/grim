@@ -352,12 +352,12 @@ export class CodeStorageStore implements GitStore {
   }
 
   /** The last commit of the file's history (paged, FIRST_AUTHOR_PAGE at a time, up to FIRST_AUTHOR_PAGES pages). */
-  async firstAuthor(repo: string, path: string, ref: string): Promise<Author | null> {
+  async firstAuthor(repo: string, path: string, branch: string): Promise<Author | null> {
     try {
       let cursor: string | undefined;
       let last: { authorName: string; authorEmail: string; message: string } | undefined;
       for (let page = 0; page < FIRST_AUTHOR_PAGES; page++) {
-        const r = await this.repo(repo).listCommits({ branch: ref, path, limit: FIRST_AUTHOR_PAGE, ...(cursor ? { cursor } : {}) });
+        const r = await this.repo(repo).listCommits({ branch, path, limit: FIRST_AUTHOR_PAGE, ...(cursor ? { cursor } : {}) });
         last = r.commits.at(-1) ?? last;
         if (!r.hasMore || !r.nextCursor) return last ? withTrailers({ name: last.authorName, email: last.authorEmail }, last.message) : null;
         cursor = r.nextCursor;

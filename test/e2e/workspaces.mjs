@@ -231,27 +231,33 @@ const agentCardState = (page) =>
       return {
         heads: secs.map((s) => s.querySelector("h3")?.textContent),
         hint: d.querySelector(".share-sec .hint")?.textContent,
-        fields: d.querySelectorAll(".share-code, input, code").length,
-        buttons: [...d.querySelectorAll("button")].map((b) => b.textContent).filter((t) => t !== "×"),
+        wsFields: secs[0]?.querySelectorAll(".share-code, input, code").length,
+        codes: [...d.querySelectorAll(".share-code-text")].map((c) => c.textContent),
+        buttons: secs.map((s) => [...s.querySelectorAll(".share-btns button")].map((b) => b.textContent)),
+        snippetsOpen: d.querySelector(".share-snippets")?.open,
+        done: [...d.querySelectorAll(".modal-actions button")].map((b) => b.textContent),
       };
     });
   const st = await dlgState();
-  check("one section, This workspace: a line and Copy prompt (no URL, no MCP); Done", JSON.stringify(st.heads) === JSON.stringify(["This workspace"]) && st.fields === 0 && JSON.stringify(st.buttons) === JSON.stringify(["Copy prompt", "Done"]) && /token that acts as you\. Revoke it under Account/.test(st.hint ?? ""), JSON.stringify(st));
+  check("two sections: This workspace (a line and Copy prompt, no URL), All your workspaces (MCP) (/mcp + Copy prompt, snippets collapsed); Done", JSON.stringify(st.heads) === JSON.stringify(["This workspace", "All your workspaces (MCP)"]) && st.wsFields === 0 && st.codes[0] === `${base}/mcp` && st.buttons.every((b) => b[0] === "Copy prompt") && st.snippetsOpen === false && st.done[0] === "Done" && /token that acts as you\. Revoke it under Account/.test(st.hint ?? ""), JSON.stringify(st));
   await alice.screenshot({ path: `${SHOTS}/share-dialog.png` });
-  await alice.click(".share-btns button");
-  check("Copy prompt → Copied", await until(alice, () => document.querySelector(".share-btns button")?.textContent === "Copied"));
+  await alice.click(".share-sec:first-child .share-btns button");
+  check("Copy prompt → Copied", await until(alice, () => document.querySelector(".share-sec:first-child .share-btns button")?.textContent === "Copied"));
   const copied = await alice.evaluate(() => window.__copied);
   const m = /^Work in this Grim workspace: (\S+)\nUse plain HTTP \(e\.g\. curl\)\. GET that URL for instructions, then POST shell commands to it.*\nSend this header on every request: Authorization: Bearer (gmt_\S+)\nAlso send X-Agent-Session-Id/s.exec(copied[0] ?? "");
   check("copies the agent instructions with the workspace's URL and a new app token", !!m && m[1] === `${base}/app/${alpha}`, JSON.stringify(copied));
   check("…the token works on the URL: it creates a note", m ? (await fetch(m[1], { method: "POST", headers: { authorization: `Bearer ${m[2]}`, "content-type": "application/json" }, body: JSON.stringify({ command: "echo hi > from-agent.md" }) })).ok : false);
-  check("Copied goes back to Copy prompt", await until(alice, () => document.querySelector(".share-btns button")?.textContent === "Copy prompt", null, 4000));
+  check("Copied goes back to Copy prompt", await until(alice, () => document.querySelector(".share-sec:first-child .share-btns button")?.textContent === "Copy prompt", null, 4000));
+  await alice.click(".share-sec + .share-sec .share-btns button");
+  await until(alice, () => window.__copied.length === 2);
+  check("the MCP section's Copy prompt: add the server's /mcp (OAuth sign-in)", (await alice.evaluate(() => window.__copied[1])) === `Add the Grim MCP server to your MCP configuration: URL ${base}/mcp (Streamable HTTP; it signs in with OAuth in the browser the first time). Then use its list_workspaces, command and changes tools to work in my Grim workspaces.`);
   await alice.keyboard.press("Escape");
   check("Escape closes it", await until(alice, () => !document.querySelector("dialog.share-modal")));
   await alice.click(".sb-agent button");
   await until(alice, () => !!document.querySelector("dialog.share-modal[open] .share-btns button"));
-  await alice.click(".share-btns button");
-  await until(alice, () => window.__copied.length === 2);
-  check("copying again reuses the token (one per workspace per session)", (await alice.evaluate(() => window.__copied[1])) === copied[0]);
+  await alice.click(".share-sec:first-child .share-btns button");
+  await until(alice, () => window.__copied.length === 3);
+  check("copying again reuses the token (one per workspace per session)", (await alice.evaluate(() => window.__copied[2])) === copied[0]);
   await alice.click("dialog.share-modal .modal-actions button");
   check("Done closes it", await until(alice, () => !document.querySelector("dialog.share-modal")));
   await openSwitcher(alice);

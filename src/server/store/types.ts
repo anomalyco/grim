@@ -226,7 +226,8 @@ export interface GitStore {
    */
   blame?(repo: string, path: string, ref: string): Promise<Author[] | null>;
   /**
-   * The author of the commit that created the file at `ref` (the oldest commit in its history there). null if
+   * The author of the commit that created the file at `ref` (the oldest commit in its history there; rooms pass their
+   * branch: Code Storage lists commits by branch only). null if
    * it isn't there or its history can't be read (or is too long to page through). Optional, like blame.
    */
   firstAuthor?(repo: string, path: string, ref: string): Promise<Author | null>;

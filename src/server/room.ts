@@ -511,11 +511,12 @@ export class Room {
         }
       } catch {}
     }
-    const commit = this.originCommit ?? (this.inBase ? this.baseCommit : null);
-    if (commit === null || !this.store.firstAuthor) return;
+    // in Git (the room opened from it, or has committed): its first commit on the branch (Code Storage lists commits by
+    // branch only, not from a commit)
+    if ((this.originCommit ?? (this.inBase ? this.baseCommit : null)) === null || !this.store.firstAuthor) return;
     this.originLoading = true;
     void Promise.resolve()
-      .then(() => this.store.firstAuthor!(this.repo, this.path, commit))
+      .then(() => this.store.firstAuthor!(this.repo, this.path, this.branch))
       .then(
         (a) => {
           if (!a || this.closed) return;

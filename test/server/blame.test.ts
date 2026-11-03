@@ -80,7 +80,7 @@ describe("store blame", () => {
 
 describe("agent sessions: names and the note's origin", () => {
   const ses = (id: string, name?: string) => `x\n\nAgent-Session-Id: ${id}${name ? `\nAgent-Session-Name: ${name}` : ""}`;
-  async function sessions(store: Store, repo: string) {
+  async function sessions(store: Pick<Store, "createRepo" | "commit" | "head">, repo: string) {
     await store.createRepo(repo, { branch: "main" });
     const bot = { name: "OpenCode", email: "opencode@agents.grimoire" };
     const c = async (content: string, who: { name: string; email: string }, message: string) => {
@@ -110,6 +110,15 @@ describe("agent sessions: names and the note's origin", () => {
       expect(await store.firstAuthor(`ses-${kind.replace(" ", "")}`, "nope.md", head)).toBeNull();
     });
   }
+
+  test("the stores the server runs on (CachedHeadStore over RoutedStore) pass firstAuthor through, by branch", async () => {
+    const { RoutedStore } = await import("../../src/server/store/routed.ts");
+    const { CachedHeadStore } = await import("../../src/server/store/cached-head.ts");
+    const store = new CachedHeadStore(new RoutedStore(new MemoryStore(), () => undefined));
+    await sessions(store, "ses-wrapped");
+    expect(await store.firstAuthor("ses-wrapped", "s.md", "main")).toMatchObject({ email: "opencode@agents.grimoire", session: "ses_a" });
+    expect(await store.firstAuthor("ses-wrapped", "nope.md", "main")).toBeNull();
+  });
 
   test("withSessionTrailer and parseSessionName: one line, trimmed, at most 120 characters; invalid ones dropped", async () => {
     const { withSessionTrailer, parseSessionName, sessionTrailers } = await import("../../src/server/store/types.ts");

@@ -59,6 +59,9 @@ export class RoutedStore implements GitStore {
   async blame(repo: string, path: string, ref: string) {
     return (await this.storeFor(repo).blame?.(repo, path, ref)) ?? null;
   }
+  async firstAuthor(repo: string, path: string, ref: string) {
+    return (await this.storeFor(repo).firstAuthor?.(repo, path, ref)) ?? null;
+  }
   async pullUpstream(repo: string, branch: string) {
     await this.storeFor(repo).pullUpstream?.(repo, branch);
   }

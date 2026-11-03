@@ -165,6 +165,9 @@ export class CachedHeadStore implements GitStore {
   async blame(repo: string, path: string, ref: string) {
     return (await this.inner.blame?.(repo, path, ref)) ?? null;
   }
+  async firstAuthor(repo: string, path: string, ref: string) {
+    return (await this.inner.firstAuthor?.(repo, path, ref)) ?? null;
+  }
 
   private after(repo: string, branch: string, out: CommitOutcome): CommitOutcome {
     this.bump(repo);

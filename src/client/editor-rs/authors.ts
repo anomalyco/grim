@@ -3,7 +3,7 @@
 // message's colours aren't used here), only where it changes. People's names are never cut (one that doesn't fit the
 // margin isn't shown); an agent's lines show its session's title ("Agent" without one), cut with "…" to the margin.
 // Hovering an agent's label shows the full title, the agent and the session id.
-// In a note an agent created (the message's `origin`), lines people wrote get a faint tint behind the text.
+// In a note an agent created (the message's `origin`), lines people wrote get a light green tint (and a thin bar at its left) behind the text.
 // Between messages the values move with the text (attribute): our own edits are ours at once, others' keep the
 // line's previous author until the next message.
 

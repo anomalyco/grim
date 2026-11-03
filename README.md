@@ -16,7 +16,7 @@ Grim is a place to write notes together. Open a note and start typing: everyone 
 2. Try the **demo workspace**: a playground anyone can edit, no account needed.
 3. **Sign in**, then create your own workspace with **New…** in the workspace switcher at the top left. Inside a workspace, organize notes into folders.
 4. Invite people by sending them a note's link.
-5. To bring in an agent, click **Share** on **Share with an agent** at the bottom of the sidebar, then **Copy prompt**, and paste it to your agent. The prompt has the workspace's link and a token that acts as you (revoke it under **Account → Tokens…**). The agent fetches the link for its instructions, then runs commands by POSTing them to it. To give an agent all your workspaces at once, connect it over MCP instead ([docs](docs/README.md#connect-an-mcp-client)).
+5. To bring in an agent, click **Share** on **Share with an agent** at the bottom of the sidebar, then **Copy prompt**, and paste it to your agent. The prompt has the workspace's link and a token that acts as you (revoke it under **Account → Tokens…**). The agent fetches the link for its instructions, then runs commands by POSTing them to it. To give an agent all your workspaces at once, use the same dialog's **All your workspaces (MCP)** section: the MCP server's URL, a prompt and opencode's config ([docs](docs/README.md#connect-an-mcp-client)).
 
 Workspaces on grimnotes.app are public: anyone with the link can read and edit them. For private notes, run your own server (below).
 

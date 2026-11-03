@@ -249,6 +249,19 @@ export function agentPrompt(url: string, token: string | null, noSignIn: boolean
   return `Work in this Grim workspace: ${url}\nUse plain HTTP (e.g. curl). GET that URL for instructions, then POST shell commands to it to read and edit its Markdown notes.\n${auth}Also send X-Agent-Session-Id: <your session id> and X-Agent-Session-Name: <your session title> if you have them.${agentsMd ? "\nThis workspace has an AGENTS.md; follow it." : ""}`;
 }
 
+/** The MCP section's prompt: add the server's `/mcp` to the agent's MCP configuration (the native app's, word for word). */
+export function mcpPrompt(mcpUrl: string, noSignIn: boolean) {
+  const auth = noSignIn ? "no sign-in needed on this server" : "it signs in with OAuth in the browser the first time";
+  return `Add the Grim MCP server to your MCP configuration: URL ${mcpUrl} (Streamable HTTP; ${auth}). Then use its list_workspaces, command and changes tools to work in my Grim workspaces.`;
+}
+
+/** The "opencode config" disclosure: opencode's MCP config (docs/README.md, "Connect an MCP client"). */
+export function mcpSnippets(mcpUrl: string, noSignIn: boolean): { name: string; where: string; code: string }[] {
+  return [
+    { name: "opencode", where: noSignIn ? "In opencode.json:" : "In opencode.json, then opencode mcp auth grim:", code: `{"mcp": {"grim": {"type": "remote", "url": "${mcpUrl}"}}}` },
+  ];
+}
+
 /** A button that copies `text()` and says "Copied" for a moment; a promise (a token being made) says "Copying…" meanwhile. */
 function copyButton(label: string, text: () => string | null | Promise<string | null>, cls = "btn"): HTMLButtonElement {
   const b: HTMLButtonElement = h("button", { type: "button", class: cls, onclick: () => void go() }, label);
@@ -283,6 +296,13 @@ function copyButton(label: string, text: () => string | null | Promise<string | 
   return b;
 }
 
+/** A value in a monospace field with its own small Copy (`wrap`: long snippets wrap instead of scrolling). */
+function codeField(value: string, wrap = false) {
+  const code = h("code", { class: "share-code-text" }, value);
+  const copy = copyButton("Copy", () => code.textContent || null, "share-code-copy");
+  return { el: h("div", { class: `share-code${wrap ? " share-code-wrap" : ""}` }, code, copy), code, copy };
+}
+
 /**
  * Copy text that's still on its way. Safari only copies within the click, so the clipboard gets a ClipboardItem with
  * the promise at once; elsewhere (or if that fails) it waits and copies. A failed `text` throws.
@@ -303,9 +323,9 @@ async function copyLater(text: Promise<string | null>): Promise<boolean> {
 }
 
 /**
- * "Share with an agent" (the sidebar card's Share): "This workspace" with only Copy prompt. Signed in, the prompt carries
- * an app token of mine (`token()`: made on the first copy, kept for the session), so the agent can do everything I can.
- * The native app's dialog matches it.
+ * "Share with an agent" (the sidebar card's Share): "This workspace" with Copy prompt (signed in, the prompt carries an
+ * app token of mine: `token()`, made on the first copy, kept for the session, so the agent can do everything I can), then
+ * the account's MCP server (`$PUBLIC_URL/mcp`) with its URL, prompt and opencode's config. The native app's dialog matches it.
  */
 export function shareDialog(opts: { url: string; noSignIn: boolean; token: (() => Promise<string>) | null; agentsMd?: boolean }) {
   const promptBtn = copyButton("Copy prompt", () =>
@@ -316,11 +336,27 @@ export function shareDialog(opts: { url: string; noSignIn: boolean; token: (() =
     : opts.noSignIn
       ? "Give this prompt to an agent (Claude, Codex, opencode…) to work in this workspace over plain HTTP."
       : "Give this prompt to an agent (Claude, Codex, opencode…) to work in this workspace over plain HTTP. Signed out, it can only edit existing notes.";
+  const mcpUrl = new URL("/mcp", opts.url).href;
+  const mcpField = codeField(mcpUrl);
+  const snippets = mcpSnippets(mcpUrl, opts.noSignIn).map((s) => ({ ...s, field: codeField(s.code, true) }));
+  const sec = (key: string, title: string, ...kids: HTMLElement[]) =>
+    h("section", { class: "share-sec", "aria-labelledby": `share-${key}` }, h("h3", { id: `share-${key}` }, title), ...kids);
   const body = h("div", { class: "modal-body share-body" },
-    h("section", { class: "share-sec", "aria-labelledby": "share-ws" },
-      h("h3", { id: "share-ws" }, "This workspace"),
+    sec("ws", "This workspace",
       h("p", { class: "hint" }, hint),
       h("div", { class: "share-btns" }, promptBtn),
+    ),
+    sec("mcp", "All your workspaces (MCP)",
+      h("p", { class: "hint" },
+        opts.noSignIn
+          ? "Add Grim as an MCP server in your agent or tool (Claude, Cursor, opencode…). It can work with all the workspaces on this server; no sign-in needed on this server."
+          : "Add Grim as an MCP server in your agent or tool (Claude, Cursor, opencode…). It can work with all your workspaces, and signs in with your Grim account the first time."),
+      mcpField.el,
+      h("div", { class: "share-btns" }, copyButton("Copy prompt", () => mcpPrompt(mcpUrl, opts.noSignIn))),
+      h("details", { class: "share-snippets" },
+        h("summary", null, "opencode config"),
+        ...snippets.map((s) => h("div", { class: "share-snippet" }, h("div", { class: "share-snippet-head" }, s.where), s.field.el)),
+      ),
     ),
     h("div", { class: "modal-actions" }, h("button", { type: "button", class: "btn btn-primary", onclick: () => dlg.close() }, "Done")),
   );
