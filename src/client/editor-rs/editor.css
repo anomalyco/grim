@@ -362,7 +362,6 @@
   display: block;
   padding-top: var(--mde-instr-label-top);
   font: 600 var(--mde-instr-label-size) / 1 var(--mde-ui-font);
-  letter-spacing: 0.02em;
   color: var(--mde-instr-label);
   white-space: nowrap;
 }
