@@ -615,7 +615,8 @@ export class NotesFs implements IFileSystem {
       if (!batch) batches.set(p.repo.id, (batch = []));
       batch.push([k, p]);
     }
-    for (const [k, why] of this.artFailed) if (!only || only(k)) errors.push(why);
+    // (unless the session already showed them: it takes the write errors of a command that failed)
+    for (const [k, why] of this.artFailed) if ((!only || only(k)) && this.writeErrors.has(why)) errors.push(why);
     if (!only) this.artFailed.clear();
     const arts = new Map<string, Array<[string, ArtifactPending]>>();
     for (const [k, a] of [...this.artPending]) {
