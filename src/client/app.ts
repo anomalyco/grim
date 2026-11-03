@@ -1,4 +1,5 @@
 // App shell: sidebar (repos, file tree, search files), document header, editor session, history, routing.
+import { ARTIFACTS_DIR } from "../shared/artifacts.ts";
 import { uiFontsLoaded } from "./fonts.ts";
 import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
@@ -1348,7 +1349,17 @@ function renderWorkspaceTree(repo: Workspace): HTMLElement {
   ul.setAttribute("role", "tree");
   ul.className = "tree";
   ul.setAttribute("aria-label", `Files in ${repo.title}`);
+  if (loaded.artifacts?.length) ul.appendChild(renderArtifacts(loaded.artifacts.map((a) => a.path)));
   return ul;
+}
+
+/** The workspace's web artifacts (artifacts/): listed, not opened here (Grim for Mac shows them in a side panel). */
+function renderArtifacts(paths: string[]): HTMLElement {
+  const title = "Web artifacts open in Grim for Mac";
+  return h("li", { role: "none", class: "artifact-list" },
+    h("div", { class: "folder-row artifact-head", title, style: { "--depth": "1" } }, h("span", { class: "folder-name" }, `${ARTIFACTS_DIR} (Grim for Mac)`)),
+    h("ul", { role: "none" }, ...paths.map((p) => h("div", { class: "file-row artifact-row", title: `${p}: opens in Grim for Mac`, style: { "--depth": "2" } }, h("span", { class: "file-name" }, p.slice(ARTIFACTS_DIR.length + 1))))),
+  );
 }
 
 function renderFolder(repo: Workspace, folder: Folder, level: number): HTMLElement {
@@ -2227,6 +2238,10 @@ function openLink(s: Session, t: LinkTarget) {
       return goTo(t.url);
     case "outside":
       toast(`“${t.path}” is outside this notebook.`, "error");
+      return;
+    case "artifact":
+      // web artifacts never open on the web (the server won't serve them to a browser): Grim for Mac's side panel
+      toast(`“${t.path}” is a web artifact: it opens in Grim for Mac.`, "info");
       return;
     case "file":
       if (!t.note) {

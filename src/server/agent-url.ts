@@ -18,6 +18,7 @@ import { MCP_AUDIENCE } from "./tokens.ts";
 import { workspaceAccess } from "./workspaces.ts";
 import { metric } from "./metrics.ts";
 import { agentsMdBlock, urlSessionKey, type AgentsMdFor } from "./agents-md.ts";
+import { MAX_ARTIFACT_BYTES, MAX_ARTIFACTS_TOTAL_BYTES } from "../shared/artifacts.ts";
 
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_NAME = "Agent";
@@ -378,11 +379,12 @@ export const AGENT_FACTS = `- Edits are live: people with the note open see them
 - Each call's writes are committed to Git right after it, on a commit of its own.
 - Each call starts fresh in the workspace's root (or \`directory\`): nothing (cd, variables, /tmp) carries over.
 - A write that fails with "changed by someone else" collided with someone's edit: read the file again and redo it.
+- Web artifacts: put HTML pages and their files (CSS, JS, images, JSON, fonts, media) under \`artifacts/\` at the workspace root (a folder per artifact, e.g. \`artifacts/report/index.html\`), and link them from notes with a relative link (\`[Report](artifacts/report/index.html)\`). Grim for Mac opens them in a side panel; the web app only lists them.
 - Grim commands: \`changes [--stat] [path]\` (what people wrote by hand since the last agent commit, unsaved edits included: run it when you come back); \`watch [path] [--timeout S]\` (waits until someone else edits; the wait doesn't count toward the time limit); \`who <file>\` (who has it open); \`repos\` (the workspace and your access); \`git log|show|diff|status\` (read-only).`;
 
 /** The shell's limits as a list; `extra` goes before the rate limits, which apply `per` (a caller and workspace, a workspace). */
 export function shellLimits(writable: boolean | null, extra: string, per: string): string {
-  return `- Only Markdown files (.md, .markdown, .mdx) can be stored in a workspace${writable === null ? " (read-only workspaces can't be written)" : writable ? "" : " (this one is read-only)"}; /tmp is private scratch space.
+  return `- Only Markdown files (.md, .markdown, .mdx) can be stored in a workspace, plus web files under artifacts/ (${MAX_ARTIFACT_BYTES / 1024 / 1024} MB each, ${MAX_ARTIFACTS_TOTAL_BYTES / 1024 / 1024} MB per workspace, no executables)${writable === null ? " (read-only workspaces can't be written)" : writable ? "" : " (this one is read-only)"}; /tmp is private scratch space.
 - No python, node or other runtimes, no network, no editors.
 - Each call stops after 30 s by default (timeout_seconds up to 110). Output over 200 KB per stream is truncated. ${extra}At most ${agentLimits.perMinute} calls per minute and ${agentLimits.concurrent} commands at a time ${per}.`;
 }

@@ -59,6 +59,8 @@ export type WorkspaceItem = Pick<Workspace, "id" | "title" | "kind" | "readOnly"
 export interface Tree {
   head: string | null;
   files: string[];
+  /** Web artifacts (artifacts/): only Grim for Mac opens them. */
+  artifacts?: { path: string; size: number }[];
 }
 
 export interface Commit {

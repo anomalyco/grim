@@ -1,7 +1,7 @@
 // Link targets (editor-rs/links.ts): where a clicked link goes; heading slugs; the links of a line view.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { findHeading, headingSlug, lineLinks, linkTarget } from "../../src/client/editor-rs/links.ts";
+import { findHeading, headingSlug, lineLinks, linkTarget, linkTitle } from "../../src/client/editor-rs/links.ts";
 import { toRLine } from "../../src/client/editor-rs/lineview.ts";
 import { safeUrl } from "../../src/client/editor-rs/input.ts";
 
@@ -45,6 +45,16 @@ describe("link targets", () => {
   test("root-relative: from the notebook root", () => {
     expect(t("/folder/x.md")).toEqual(note("folder/x.md"));
     expect(t("/Welcome")).toEqual(note("Welcome.md"));
+  });
+
+  test("web artifacts (artifacts/): their own kind, Markdown there still a note", () => {
+    expect(linkTarget("artifacts/demo/index.html", { notePath: "a.md" })).toEqual({ kind: "artifact", path: "artifacts/demo/index.html" });
+    expect(linkTarget("../artifacts/demo/", { notePath: "x/a.md" })).toEqual({ kind: "artifact", path: "artifacts/demo" });
+    expect(linkTarget("/artifacts/r/i.html", { notePath: "x/y/a.md" })).toEqual({ kind: "artifact", path: "artifacts/r/i.html" });
+    expect(linkTarget("artifacts/notes.md", { notePath: "a.md" }).kind).toBe("file");
+    expect(linkTarget("x/artifacts/i.html", { notePath: "a.md" }).kind).toBe("file");
+    expect(linkTitle("artifacts/demo/index.html", "a.md")).toBe("artifacts/demo/index.html: opens in Grim for Mac");
+    expect(linkTitle("https://e.com")).toBe("https://e.com");
   });
 
   test("leaving the notebook", () => {

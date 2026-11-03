@@ -48,6 +48,8 @@ export interface ShellSnapshot {
   headDate: string | null;
   /** Markdown files at the head with sizes (and dates when the store knows them); full snapshots only. */
   files?: FileMeta[];
+  /** Artifact files (under artifacts/, Markdown aside) at the head with sizes; full snapshots only. */
+  artifacts?: FileMeta[];
   /** Committed text at the head: the files the runtime has cached (full snapshots), plus those asked for in `want`. */
   contents: Record<string, string>;
   /** Text of open notes (unsaved edits included): all of them (full) or those that changed since `since`. */
@@ -66,6 +68,13 @@ export interface ShellWrite {
   content: string;
   /** Set when the command only appended: this text goes at the live end (else `base` → `content` is merged). */
   appended: string | null;
+}
+
+/** One artifact write (`bytes`) or delete, for `writeArtifacts`. */
+export interface ArtifactChange {
+  path: string;
+  bytes?: Uint8Array;
+  delete?: boolean;
 }
 
 export interface SaveResult {
@@ -104,6 +113,12 @@ export interface WorkspaceApi {
   renameFolder(repo: RepoRow, from: string, to: string, actor: Participant): Promise<{ path: string }>;
   deleteFolder(repo: RepoRow, dir: string, actor: Participant): Promise<{ ok: true }>;
   uploadImage(repo: RepoRow, notePath: string, filename: string, bytes: Uint8Array, actor: Participant): Promise<ImageUpload>;
+  /** An artifact file's bytes (under artifacts/), with the type the Mac app serves it as (shared/artifacts.ts). */
+  readArtifact(repo: RepoRow, path: string, ref?: string): Promise<RawRead>;
+  /** The artifact files at the branch tip, with sizes. */
+  artifacts(repo: RepoRow): Promise<FileMeta[]>;
+  /** Artifact writes and deletes in one commit (checked: types, sizes, executables, the workspace's total). */
+  writeArtifacts(repo: RepoRow, changes: ArtifactChange[], actor: Participant): Promise<{ commit: string | null; written: string[]; deleted: string[] }>;
   /**
    * The shell's view in one call: the head listing, open notes' live text and cached committed text, only what
    * changed since `since` (a version from an earlier snapshot). `want`: committed files to read too, in that order,

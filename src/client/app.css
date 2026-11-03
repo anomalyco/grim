@@ -2713,3 +2713,14 @@ input[type="radio"] {
   width: fit-content;
   max-width: calc(100% - 32px);
 }
+
+/* web artifacts (artifacts/): listed only, Grim for Mac opens them */
+.artifact-list .artifact-head,
+.artifact-list .artifact-row {
+  cursor: default;
+  color: var(--muted, #888);
+}
+.artifact-list .artifact-row:hover,
+.artifact-list .artifact-head:hover {
+  background: none;
+}

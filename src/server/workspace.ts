@@ -19,7 +19,8 @@ import { AGENT_EMAIL, CHANGES_HISTORY, diffPaths, fileDiff, MAX_CHANGES_BYTES, t
 import type { AppEvent } from "./seams/events.ts";
 import { CLOSE, CODE, createWorkspaceSocket, WorkspaceSocketSet, type AdmittedSocket, type OpenErrorCode, type OpenRoomResult, type WorkspaceSocket } from "./wsmux.ts";
 import { AGENTS_MD, capAgentsMd, memorySeenStore, type AgentsMd, type AgentsMdFor, type SeenStore } from "./agents-md.ts";
-import type { AdmittedWorkspace, DirtyNote, PresenceUser, SaveResult, ShellSnapshot, ShellWrite, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
+import type { AdmittedWorkspace, ArtifactChange, DirtyNote, PresenceUser, SaveResult, ShellSnapshot, ShellWrite, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
+import { ARTIFACTS_DIR, artifactPathProblem, artifactType, looksExecutable, MAX_ARTIFACT_BYTES, MAX_ARTIFACT_FILES, MAX_ARTIFACTS_TOTAL_BYTES, underArtifacts } from "../shared/artifacts.ts";
 
 /**
  * The store as the runtime uses it: a CachedHeadStore (index.ts) also takes `{ fresh: true }` (pollers) and
@@ -117,7 +118,7 @@ export class WorkspaceRuntime implements WorkspaceApi {
   /** Change numbers below this were forgotten (closed notes pruned): older versions get a full snapshot. */
   private liveFloor = 0;
   private liveSeen = new Map<string, { seq: number; text: string | null }>();
-  private headListing: { head: string; files: Promise<{ head: string; files: FileMeta[]; date: string | null }> } | null = null;
+  private headListing: { head: string; files: Promise<{ head: string; files: FileMeta[]; artifacts: FileMeta[]; date: string | null }> } | null = null;
   /** Protocol v2 sockets of this workspace (Bun: attachSocket) and their events. */
   readonly sockets = new WorkspaceSocketSet({ room: (p) => this.rooms.peek(this.id, p), rooms: () => this.rooms.inRepo(this.id) });
   /** The branch the sockets were admitted on (for `tree` heads). */
@@ -238,11 +239,97 @@ export class WorkspaceRuntime implements WorkspaceApi {
   async readRaw(repo: RepoRow, p: string, ref?: string) {
     this.check(repo);
     const { path, type } = imagePath(p);
+    // artifacts are read only by the Mac app, through readArtifact (served as downloads, never rendered)
+    if (underArtifacts(path)) throw new OpError(403, `${path} is a web artifact: it opens in Grim for Mac`);
     if (ref && !SAFE_REF.test(ref)) throw new OpError(400, `invalid ref: ${ref}`);
     ref ??= (await this.store.head(repo.id, repo.branch)) ?? undefined;
     const bytes = ref ? await this.store.readBlob(repo.id, path, ref, MAX_RAW_BYTES) : null;
     if (bytes === null) throw new OpError(404, `${path} not found`);
     return { path, type, bytes };
+  }
+
+  /** An artifact file's bytes at `ref` (default: the branch tip), with the type the Mac app serves it as. */
+  async readArtifact(repo: RepoRow, p: string, ref?: string) {
+    this.check(repo);
+    const clean = artifactClean(p);
+    const type = artifactType(clean);
+    if (!underArtifacts(clean) || !type) throw new OpError(404, `${clean} is not an artifact`);
+    if (ref && !SAFE_REF.test(ref)) throw new OpError(400, `invalid ref: ${ref}`);
+    ref ??= (await this.store.head(repo.id, repo.branch)) ?? undefined;
+    const bytes = ref ? await this.store.readBlob(repo.id, clean, ref, MAX_ARTIFACT_BYTES) : null;
+    if (bytes === null) throw new OpError(404, `${clean} not found`);
+    return { path: clean, type, bytes };
+  }
+
+  /** The artifact files at the branch tip (everything under artifacts/ but Markdown), with sizes. */
+  async artifacts(repo: RepoRow): Promise<FileMeta[]> {
+    this.check(repo);
+    const head = await this.store.head(repo.id, repo.branch);
+    return head ? (await this.listing(repo, head)).artifacts : [];
+  }
+
+  /**
+   * Write and delete artifact files in one commit by `actor` (the agent shell's writes under artifacts/). Each path
+   * must be an artifact type, at most MAX_ARTIFACT_BYTES, not an executable; the workspace's artifacts together stay
+   * under MAX_ARTIFACTS_TOTAL_BYTES and MAX_ARTIFACT_FILES. Unchanged files aren't committed; nothing changed, no commit.
+   */
+  async writeArtifacts(repo: RepoRow, changes: ArtifactChange[], actor: Participant): Promise<{ commit: string | null; written: string[]; deleted: string[] }> {
+    this.check(repo);
+    writable(repo);
+    const byPath = new Map<string, ArtifactChange>();
+    for (const c of changes) {
+      const clean = artifactClean(c.path);
+      if (!c.delete) {
+        const why = artifactPathProblem(clean);
+        if (why) throw new OpError(415, `${clean}: ${why}`);
+        const bytes = c.bytes ?? new Uint8Array();
+        if (bytes.length > MAX_ARTIFACT_BYTES) throw new OpError(413, `${clean}: artifacts can be at most ${MAX_ARTIFACT_BYTES / 1024 / 1024} MB per file`);
+        if (looksExecutable(bytes)) throw new OpError(415, `${clean}: executables can't be stored`);
+        byPath.set(clean, { path: clean, bytes });
+      } else {
+        if (!underArtifacts(clean)) throw new OpError(400, `${clean} is not an artifact`);
+        byPath.set(clean, { path: clean, delete: true });
+      }
+    }
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const head = await this.store.head(repo.id, repo.branch);
+      const current = new Map((head ? (await this.listing(repo, head)).artifacts : []).map((f) => [f.path, f.size] as const));
+      const out: Change[] = [];
+      const written: string[] = [];
+      const deleted: string[] = [];
+      for (const c of byPath.values()) {
+        if (c.delete) {
+          if (!current.has(c.path)) continue;
+          out.push({ path: c.path, delete: true });
+          current.delete(c.path);
+          deleted.push(c.path);
+          continue;
+        }
+        const bytes = c.bytes!;
+        if (head && current.get(c.path) === bytes.length) {
+          const old = await this.store.readBlob(repo.id, c.path, head, MAX_ARTIFACT_BYTES).catch(() => null);
+          if (old && sameBytes(old, bytes)) continue;
+        }
+        out.push({ path: c.path, content: bytes });
+        current.set(c.path, bytes.length);
+        written.push(c.path);
+      }
+      if (!out.length) return { commit: null, written, deleted };
+      let total = 0;
+      for (const size of current.values()) total += size;
+      if (current.size > MAX_ARTIFACT_FILES) throw new OpError(413, `a workspace can hold at most ${MAX_ARTIFACT_FILES} artifact files`);
+      if (total > MAX_ARTIFACTS_TOTAL_BYTES) throw new OpError(413, `a workspace's artifacts can be at most ${MAX_ARTIFACTS_TOTAL_BYTES / 1024 / 1024} MB together (these would make ${(total / 1024 / 1024).toFixed(1)} MB)`);
+      const names = [...written, ...deleted];
+      const message = names.length === 1 ? `${deleted.length ? "Delete" : "Update"} ${names[0]}` : `Update ${names.length} files in ${ARTIFACTS_DIR}/`;
+      const res = await this.store.commit({ repo: repo.id, branch: repo.branch, expectedHead: head, changes: out, message: withSessionTrailer(message, authorOf(actor)), author: authorOf(actor) });
+      if (res.ok) {
+        await this.onPush(repo);
+        for (const p of names) notifyChange(repo.id, p);
+        emit({ type: "tree", repo: repo.id });
+        return { commit: res.sha, written, deleted };
+      }
+    }
+    throw new OpError(409, "could not commit: the branch keeps moving");
   }
 
   /**
@@ -574,6 +661,7 @@ export class WorkspaceRuntime implements WorkspaceApi {
     const out: ShellSnapshot = { version: `${this.snapEpoch}:${head ?? "-"}:${this.liveSeq}`, full, head, headDate: listing?.date ?? null, contents: {}, live: {}, closed: [] };
     if (full) {
       out.files = listing?.files ?? [];
+      out.artifacts = listing?.artifacts ?? [];
       for (const [p, text] of open) out.live[p] = text;
     } else {
       for (const [p, s] of this.liveSeen) {
@@ -635,7 +723,7 @@ export class WorkspaceRuntime implements WorkspaceApi {
         ? await this.store.listFilesWithMetadata(repo.id, head)
         : (await this.store.listFiles(repo.id, head)).map((f) => ({ path: f, size: headTexts.get(`${repo.id}\0${head}\0${f}`)?.length ?? 0 }));
       const [last] = await this.store.history(repo.id, repo.branch, undefined, 1).catch(() => []);
-      return { head, files: files.filter((f) => isMarkdown(f.path)), date: last?.date ?? null };
+      return { head, files: files.filter((f) => isMarkdown(f.path)), artifacts: files.filter((f) => underArtifacts(f.path)), date: last?.date ?? null };
     })();
     const entry = { head, files };
     this.headListing = entry;
@@ -881,4 +969,12 @@ export class RuntimeMap implements WorkspaceHost {
   forget(repoId: string) {
     this.runtimes.delete(repoId);
   }
+}
+
+/** A repo-relative artifact path, cleaned (no "..", .git or control characters), or a 400. */
+function artifactClean(p: string): string {
+  if (/[\x00-\x1f\x7f]/.test(p)) throw new OpError(400, "invalid path");
+  const parts = p.replace(/\\/g, "/").split("/").filter((s) => s && s !== ".");
+  if (!parts.length || parts.some((s) => s === ".." || s.toLowerCase().startsWith(".git"))) throw new OpError(400, `invalid path: ${p}`);
+  return parts.join("/");
 }

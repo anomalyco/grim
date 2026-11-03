@@ -19,6 +19,7 @@ import { clientIp } from "./proxy.ts";
 import { demoGate, isDemoRoom } from "./demo-rooms.ts";
 import { metric } from "./metrics.ts";
 import { landingWorkspace } from "./personal.ts";
+import { underArtifacts } from "../shared/artifacts.ts";
 
 class HttpError extends Error {
   override name = "HttpError";
@@ -363,9 +364,12 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       // Opening a folder adds it to the user's joined list.
       if (user) await recordJoin(ctx.repos.db, user.id, repo.id);
       // The head from the workspace's runtime, which makes the commits (on Workers the Worker's own cache never hears of them).
-      const [files, head] = await Promise.all([ctx.repos.tree(repo), ctx.repos.host.get(repo.id).head(repo)]);
+      const host = ctx.repos.host.get(repo.id);
+      const [files, head, arts] = await Promise.all([ctx.repos.tree(repo), host.head(repo), host.artifacts(repo)]);
+      // Web artifacts (artifacts/, shared/artifacts.ts) with their sizes: listed, opened only by Grim for Mac.
+      const artifacts = arts.map((f) => ({ path: f.path, size: f.size }));
       // The tree is the committed files at the head plus the notes not saved yet, so a hash of the body is its version.
-      const text = JSON.stringify({ head, files });
+      const text = JSON.stringify({ head, files, artifacts });
       const etag = `"${createHash("sha1").update(text).digest("base64url")}"`;
       // private, no-cache: browsers keep it and revalidate every time (a 304 when nothing changed).
       const headers = { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-cache", etag };
@@ -383,6 +387,12 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       return json({ content: r.content, version: r.version, live: r.live });
     }
     case "raw":
+      // A web artifact (artifacts/): only for app clients (Grim for Mac, with its token), and as a download a
+      // browser never renders (artifactResponse), so an artifact's HTML or JS can't run on this origin.
+      if (underArtifacts(rawPath(url))) {
+        if (!artifactClient(req, user)) throw new HttpError(403, "web artifacts open in Grim for Mac");
+        return artifactResponse(await ctx.repos.host.get(repo.id).readArtifact(repo, rawPath(url), url.searchParams.get("ref") || undefined));
+      }
       // An image from the repo, for notes that show it. Served with its type from the extension, never sniffed;
       // SVGs can't run scripts or load anything.
       return rawResponse(await ops.readRaw(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined));
@@ -407,6 +417,39 @@ async function createFolder(ctx: Ctx, user: User, b: Record<string, unknown>) {
   const title = str(typeof b.title === "string" ? b.title.trim() : b.title, "title").slice(0, 100);
   if (/^\.+$/.test(slugify(title))) throw new HttpError(400, "invalid title");
   return ctx.repos.createNotesRepo(title, user.id);
+}
+
+/** The `path` of a raw read, cleaned as artifact paths are compared (leading slashes and "./" dropped). */
+function rawPath(url: URL): string {
+  return (url.searchParams.get("path") ?? "").replace(/\\/g, "/").split("/").filter((s) => s && s !== ".").join("/");
+}
+
+/**
+ * Whether a request may read web artifacts: an app client, never a browser page. Signed in with an app token
+ * (Authorization: Bearer, which navigations and <img>/<iframe> loads never send); on a server without sign-in, a
+ * request that says it's the app (X-Grim-Client, a header only scripts and apps can add).
+ */
+function artifactClient(req: Request, user: User | null): boolean {
+  if (user && bearerToken(req)) return true;
+  return !config.signIn && /^mac\b/i.test(req.headers.get("x-grim-client") ?? "");
+}
+
+/**
+ * An artifact's bytes for the Mac app, which serves them to its panel with their real type itself: here a download
+ * (attachment, octet-stream, nosniff, sandboxed by CSP), so a browser that gets one anyway never renders it.
+ */
+export function artifactResponse(r: { path: string; bytes: Uint8Array<ArrayBuffer> }): Response {
+  const name = r.path.split("/").pop() ?? "artifact";
+  return new Response(r.bytes, {
+    headers: {
+      "content-type": "application/octet-stream",
+      "content-disposition": `attachment; filename="${name.replace(/[^\w.-]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'; sandbox",
+      "cross-origin-resource-policy": "same-origin",
+      "cache-control": "private, no-cache",
+    },
+  });
 }
 
 export function rawResponse(r: { type: string; bytes: Uint8Array<ArrayBuffer> }): Response {

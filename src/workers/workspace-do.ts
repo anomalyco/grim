@@ -27,7 +27,7 @@ import { repoCacheDb } from "../server/repo-cache.ts";
 import { runDueImport, type ImportState, type RepoRow } from "../server/repos.ts";
 import { ensureRoomTables, RoomManager, type Conn } from "../server/rooms.ts";
 import type { AppEvent } from "../server/seams/events.ts";
-import type { ShellWrite, WorkspaceApi } from "../server/seams/workspace-host.ts";
+import type { ArtifactChange, ShellWrite, WorkspaceApi } from "../server/seams/workspace-host.ts";
 import { CachedHeadStore, repoHeadWriter } from "../server/store/cached-head.ts";
 import type { GitStore } from "../server/store/types.ts";
 import { WorkspaceRuntime } from "../server/workspace.ts";
@@ -854,6 +854,15 @@ export class WorkspaceDO extends DurableObject<Env> implements WorkspaceApi {
   }
   uploadImage(repo: RepoRow, notePath: string, filename: string, bytes: Uint8Array, actor: Participant) {
     return this.#call(repo, (rt) => rt.uploadImage(repo, notePath, filename, bytes, actor));
+  }
+  readArtifact(repo: RepoRow, path: string, ref?: string) {
+    return this.#call(repo, (rt) => rt.readArtifact(repo, path, ref));
+  }
+  artifacts(repo: RepoRow) {
+    return this.#call(repo, (rt) => rt.artifacts(repo));
+  }
+  writeArtifacts(repo: RepoRow, changes: ArtifactChange[], actor: Participant) {
+    return this.#call(repo, (rt) => rt.writeArtifacts(repo, changes, actor));
   }
   tree(repo: RepoRow) {
     return this.#call(repo, (rt) => rt.tree(repo));

@@ -11,6 +11,7 @@ import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath } from "./repos.ts";
 import { isUnfurler } from "./share-meta.ts";
+import { underArtifacts } from "../shared/artifacts.ts";
 
 /** The same URL answers HTML or Markdown: caches must key on Accept, and live text is never stored. */
 const NEGOTIATED = { vary: "Accept", "cache-control": "no-store", "x-content-type-options": "nosniff" };
@@ -73,6 +74,8 @@ export async function noteUrlResponse(url: URL, ctx: Ctx): Promise<Response> {
     const repo = await ctx.repos.get(id);
     if (!repo) return notFound(id);
     if (repo.status !== "ready") return text(repo.status === "importing" ? `${repo.id} is still importing\n` : `${repo.id}: ${repo.error ?? repo.status}\n`, 409);
+    // a web artifact: never served here (only Grim for Mac reads them, through the raw API with its token)
+    if (underArtifacts(path)) return text(`${path} is a web artifact: it opens in Grim for Mac's side panel.\n`, 404);
     const ext = /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase() ?? "";
     // an image the notes show: its bytes, served as the raw route does (its type, never sniffed; SVGs sandboxed)
     if (ops.IMAGE_TYPES[ext]) {

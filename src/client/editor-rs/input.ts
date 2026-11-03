@@ -7,7 +7,7 @@ import { ALT, CTRL, META, SHIFT } from "./types.ts";
 import { scrollBy, visibleBounds } from "./layout.ts";
 import type { RustEditorView } from "./view.ts";
 import { crashSafe } from "./guard.ts";
-import { linkDest, type LineLink } from "./links.ts";
+import { linkDest, linkTitle, type LineLink } from "./links.ts";
 import { lineDivOf, lineIndexOf } from "./blocks.ts";
 
 /** How far (px) the pointer may move during a click before it becomes a drag. */
@@ -399,7 +399,7 @@ export function attachRustInput(v: RustEditorView): () => void {
     if (raw === hot) return;
     hot = raw;
     v.wrapper.classList.toggle("lk-hot", raw !== null);
-    if (raw !== null) root.title = raw;
+    if (raw !== null) root.title = linkTitle(hit!.link.raw, v.collab?.path);
     else root.removeAttribute("title");
   };
 

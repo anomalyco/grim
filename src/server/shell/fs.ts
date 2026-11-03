@@ -9,6 +9,7 @@ import { isErr } from "../errors.ts";
 import type { Participant } from "../rooms.ts";
 import type { ShellSnapshot, ShellWrite } from "../seams/workspace-host.ts";
 import { isMarkdown, MAX_FILE_BYTES, type FileMeta } from "../store/types.ts";
+import { ARTIFACTS_DIR, artifactPathProblem, looksExecutable, MAX_ARTIFACT_BYTES, underArtifacts } from "../../shared/artifacts.ts";
 
 type ReadFileOptions = { encoding?: BufferEncoding | null };
 type WriteFileOptions = { encoding?: BufferEncoding };
@@ -47,7 +48,7 @@ export const CAPTURE = { stdout: "/dev/grimoire-stdout", stderr: "/dev/grimoire-
 const MAX_READ_BYTES = 8 * 1024 * 1024;
 /** Committed text a call keeps (all workspaces). */
 const MAX_VIEW_BYTES = 16 * 1024 * 1024;
-const MD_HINT = "only Markdown files (.md, .markdown, .mdx) can be stored in /workspace; use /tmp for other files";
+const MD_HINT = `only Markdown files (.md, .markdown, .mdx) can be stored in /workspace, and web files (HTML, CSS, JS, images…) under ${ARTIFACTS_DIR}/; use /tmp for other files`;
 
 export class FsError extends Error {
   constructor(
@@ -91,6 +92,21 @@ function toText(content: FileContent, options?: WriteFileOptions | BufferEncodin
   return text;
 }
 
+/** Bytes of what a command writes (redirects pass byte strings as "binary"). */
+function toBytes(content: FileContent, options?: WriteFileOptions | BufferEncoding): Uint8Array {
+  if (content instanceof Uint8Array) return content;
+  const enc = typeof options === "string" ? options : options?.encoding;
+  if (enc === "binary" || enc === "latin1" || enc === "base64" || enc === "hex") return new Uint8Array(Buffer.from(content, enc));
+  return new TextEncoder().encode(content);
+}
+
+/** An artifact's bytes as `readFile` returns them: in the encoding asked for, else UTF-8 text. */
+function encodeBytes(bytes: Uint8Array, options?: ReadFileOptions | BufferEncoding): string {
+  const enc = typeof options === "string" ? options : options?.encoding;
+  if (enc === "binary" || enc === "latin1" || enc === "base64" || enc === "hex") return Buffer.from(bytes).toString(enc);
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
 function encodeText(text: string, options?: ReadFileOptions | BufferEncoding): string {
   const enc = typeof options === "string" ? options : options?.encoding;
   if (enc === "binary" || enc === "latin1" || enc === "base64" || enc === "hex") return Buffer.from(text, "utf8").toString(enc);
@@ -116,6 +132,13 @@ interface Pending {
   appended: string | null;
 }
 
+/** An artifact write (`bytes`) or delete (null) of this command, committed at the end of it (`sync`). */
+interface ArtifactPending {
+  repo: RepoRow;
+  path: string;
+  bytes: Uint8Array | null;
+}
+
 interface RepoIndex {
   files: Set<string>;
   dirs: Set<string>;
@@ -128,6 +151,8 @@ interface View {
   headDate: Date;
   /** Markdown files at the head. */
   meta: Map<string, FileMeta>;
+  /** Artifact files (under artifacts/) at the head. */
+  artifacts: Map<string, FileMeta>;
   /** Committed text at the head, as far as fetched. */
   committed: Map<string, string>;
   committedBytes: number;
@@ -146,6 +171,12 @@ interface View {
  */
 export class NotesFs implements IFileSystem {
   private pending = new Map<string, Pending>();
+  /** Artifact writes and deletes of this command, by "repo\0path" (one commit per workspace when it ends). */
+  private artPending = new Map<string, ArtifactPending>();
+  /** Artifact writes that failed in this command ("repo\0path" → why): never committed, reported by `sync`. */
+  private artFailed = new Map<string, string>();
+  /** Artifact bytes read in this command. */
+  private artRead = new Map<string, Uint8Array>();
   /** Directories made with mkdir that have no files yet, as "repo/dir". */
   private dirs = new Set<string>();
   /** Files this call changed that may still be uncommitted, as "repo\0path" (for `save` without arguments). */
@@ -199,6 +230,7 @@ export class NotesFs implements IFileSystem {
     this.forgetRepos();
     this.writeErrors.clear();
     this.invalidate();
+    this.artRead.clear();
     for (const v of this.views.values()) v.errors.clear();
   }
 
@@ -241,8 +273,9 @@ export class NotesFs implements IFileSystem {
     let v = this.views.get(id);
     if (s.full || !v) {
       if (v) this.dropCommitted(v);
-      v = { version: s.version, head: s.head, headDate: new Date(), meta: new Map(), committed: new Map(), committedBytes: 0, live: new Map(), errors: v?.errors ?? new Map(), index: null };
+      v = { version: s.version, head: s.head, headDate: new Date(), meta: new Map(), artifacts: new Map(), committed: new Map(), committedBytes: 0, live: new Map(), errors: v?.errors ?? new Map(), index: null };
       for (const f of s.files ?? []) v.meta.set(f.path, f);
+      for (const f of s.artifacts ?? []) v.artifacts.set(f.path, f);
       this.views.set(id, v);
     }
     v.version = s.version;
@@ -314,8 +347,10 @@ export class NotesFs implements IFileSystem {
     const v = await this.view(repo);
     if (!v.index) {
       const files = new Set(v.meta.keys());
+      for (const p of v.artifacts.keys()) files.add(p);
       for (const p of v.live.keys()) files.add(p);
       for (const p of this.pending.values()) if (p.repo.id === repo.id) files.add(p.path);
+      for (const a of this.artPending.values()) if (a.repo.id === repo.id) a.bytes ? files.add(a.path) : files.delete(a.path);
       v.index = { files, dirs: new Set() };
       for (const f of files) addParents(v.index.dirs, f);
     }
@@ -420,6 +455,12 @@ export class NotesFs implements IFileSystem {
   /** Size and date of a file without downloading it. */
   private async meta(repo: RepoRow, path: string): Promise<{ size: number; mtime: Date }> {
     const v = await this.view(repo);
+    if (underArtifacts(path)) {
+      const pend = this.artPending.get(key(repo.id, path));
+      if (pend?.bytes) return { size: pend.bytes.length, mtime: new Date() };
+      const a = v.artifacts.get(path);
+      return { size: a?.size ?? 0, mtime: a?.date ? new Date(a.date) : v.headDate };
+    }
     const live = this.pending.get(key(repo.id, path))?.content ?? v.live.get(path);
     if (live !== undefined) return { size: Buffer.byteLength(live), mtime: new Date() };
     const m = v.meta.get(path);
@@ -443,9 +484,37 @@ export class NotesFs implements IFileSystem {
     }
   }
 
+  /** An artifact's bytes: this command's write, else the branch tip's (read once per command). */
+  private async artifactBytes(repo: RepoRow, path: string, p: string, op: string): Promise<Uint8Array> {
+    const k = key(repo.id, path);
+    const pend = this.artPending.get(k);
+    if (pend) {
+      if (pend.bytes) return pend.bytes;
+      throw new FsError("ENOENT", `no such file or directory, ${op} '${this.full(p)}'`);
+    }
+    const had = this.artRead.get(k);
+    if (had) return had;
+    try {
+      const r = await this.host(repo).readArtifact(repo, path);
+      this.artRead.set(k, r.bytes);
+      return r.bytes;
+    } catch (e) {
+      if (isErr(e, "FileTooLargeError")) throw new FsError("EFBIG", `file too large, '${this.full(p)}' (max ${MAX_ARTIFACT_BYTES / 1024 / 1024} MB per artifact)`);
+      return this.opError(e, op, p);
+    }
+  }
+
+  /** A file to read: its repo and path, and whether it's an artifact (bytes) rather than a note (text). */
+  private async readable(p: string, op: string) {
+    const n = await this.need(p, op);
+    if (n.kind === "dir") throw new FsError("EISDIR", `illegal operation on a directory, read '${this.full(p)}'`);
+    return { repo: n.repo!, path: n.path, artifact: underArtifacts(n.path) };
+  }
+
   private async readText(p: string, op = "open"): Promise<string> {
     const n = await this.need(p, op);
     if (n.kind === "dir") throw new FsError("EISDIR", `illegal operation on a directory, read '${this.full(p)}'`);
+    if (underArtifacts(n.path)) return new TextDecoder("utf-8").decode(await this.artifactBytes(n.repo!, n.path, p, op));
     const k = key(n.repo!.id, n.path);
     const pend = this.pending.get(k);
     if (pend) return pend.content;
@@ -478,6 +547,59 @@ export class NotesFs implements IFileSystem {
   }
 
   /**
+   * An artifact write (under artifacts/, shared/artifacts.ts): kept as bytes until the command ends, then committed
+   * with the command's other artifact writes in one commit (`sync`). Checked now: the type, the size, executables.
+   */
+  private async putArtifact(p: string, op: string, mode: "write" | "append", bytes: Uint8Array) {
+    const l = this.loc(p);
+    const repo = await this.writableRepo(p, op, l);
+    const why = artifactPathProblem(l.path);
+    if (why) throw new FsError("EACCES", `permission denied, ${op} '${this.full(p)}' (${why})`);
+    const n = await this.node({ repo: repo.id, path: l.path });
+    if (n?.kind === "dir") throw new FsError("EISDIR", `illegal operation on a directory, ${op} '${this.full(p)}'`);
+    if (!n) this.guestDenied(op, p, "Creating artifacts");
+    let content = bytes;
+    if (mode === "append" && n) {
+      const before = await this.artifactBytes(repo, l.path, p, op);
+      content = new Uint8Array(before.length + bytes.length);
+      content.set(before);
+      content.set(bytes, before.length);
+    }
+    if (content.length > MAX_ARTIFACT_BYTES) throw new FsError("EFBIG", `file too large, ${op} '${this.full(p)}' (max ${MAX_ARTIFACT_BYTES / 1024 / 1024} MB per artifact)`);
+    if (looksExecutable(content)) throw new FsError("EACCES", `permission denied, ${op} '${this.full(p)}' (executables can't be stored)`);
+    this.artPending.set(key(repo.id, l.path), { repo, path: l.path, bytes: content });
+    const ix = await this.repoIndex(repo);
+    ix.files.add(l.path);
+    addParents(ix.dirs, l.path);
+  }
+
+  /**
+   * An artifact write that, if it fails, leaves the file as it was before the command (a redirect's truncate must
+   * not commit an empty file when what follows is refused) and fails the command (`sync` reports it).
+   */
+  private async artifactWrite(p: string, mode: "write" | "append", bytes: Uint8Array) {
+    const l = this.loc(p);
+    const k = key(l.repo!, l.path);
+    if (this.artFailed.has(k)) throw new FsError("EACCES", this.artFailed.get(k)!);
+    try {
+      await this.putArtifact(p, "open", mode, bytes);
+    } catch (e) {
+      if (!(e instanceof FsError) || e.code === "ENOENT" || e.code === "EROFS") throw e;
+      this.artFailed.set(k, e.message);
+      if (this.artPending.delete(k)) this.invalidate(l.repo);
+      const r = await this.repo(l.repo!);
+      if (r) this.views.get(r.row.id) && ((await this.view(r.row)).index = null);
+      throw e;
+    }
+  }
+
+  /** Whether a /workspace path is under a repo's artifacts/ folder (so its writes are bytes, not a note's text). */
+  private isArtifact(p: string): boolean {
+    const l = this.loc(p);
+    return !!l.repo && underArtifacts(l.path);
+  }
+
+  /**
    * Apply pending writes to the rooms (people see them live; the room commits after its quiet period), one batch per
    * workspace. Returns error messages for writes that could not be applied. `only` limits it to some "repo\0path" keys.
    */
@@ -492,6 +614,28 @@ export class NotesFs implements IFileSystem {
       let batch = batches.get(p.repo.id);
       if (!batch) batches.set(p.repo.id, (batch = []));
       batch.push([k, p]);
+    }
+    for (const [k, why] of this.artFailed) if (!only || only(k)) errors.push(why);
+    if (!only) this.artFailed.clear();
+    const arts = new Map<string, Array<[string, ArtifactPending]>>();
+    for (const [k, a] of [...this.artPending]) {
+      if (only && !only(k)) continue;
+      this.artPending.delete(k);
+      let batch = arts.get(a.repo.id);
+      if (!batch) arts.set(a.repo.id, (batch = []));
+      batch.push([k, a]);
+    }
+    for (const batch of arts.values()) {
+      const repo = batch[0]![1].repo;
+      try {
+        if (!(await this.mayWrite(repo))) throw this.writeDenied(repo, "write", `${WORKSPACE}/${repo.id}/${ARTIFACTS_DIR}`);
+        await this.host(repo).writeArtifacts(repo, batch.map(([, a]) => (a.bytes ? { path: a.path, bytes: a.bytes } : { path: a.path, delete: true })), this.actor);
+        for (const [k, a] of batch) a.bytes ? this.artRead.set(k, a.bytes) : this.artRead.delete(k);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        errors.push(batch.length === 1 ? `${WORKSPACE}/${repo.id}/${batch[0]![1].path}: ${msg}` : `${WORKSPACE}/${repo.id}/${ARTIFACTS_DIR}: ${msg}`);
+      }
+      this.invalidate(repo.id);
     }
     for (const batch of batches.values()) {
       const repo = batch[0]![1].repo;
@@ -518,8 +662,10 @@ export class NotesFs implements IFileSystem {
 
   /** Drop the pending writes of a command that didn't finish. */
   discard() {
-    if (!this.pending.size) return;
+    if (!this.pending.size && !this.artPending.size) return;
     this.pending.clear();
+    this.artPending.clear();
+    this.artFailed.clear();
     this.invalidate();
   }
 
@@ -555,18 +701,24 @@ export class NotesFs implements IFileSystem {
   // ---- IFileSystem ----
 
   async readFile(p: string, options?: ReadFileOptions | BufferEncoding): Promise<string> {
+    const r = await this.readable(p, "open");
+    if (r.artifact) return encodeBytes(await this.artifactBytes(r.repo, r.path, p, "open"), options);
     return encodeText(await this.readText(p), options);
   }
 
   async readFileBuffer(p: string): Promise<Uint8Array> {
+    const r = await this.readable(p, "open");
+    if (r.artifact) return this.artifactBytes(r.repo, r.path, p, "open");
     return new TextEncoder().encode(await this.readText(p));
   }
 
   writeFile(p: string, content: FileContent, options?: WriteFileOptions | BufferEncoding): Promise<void> {
+    if (this.isArtifact(p)) return this.noting(() => this.artifactWrite(p, "write", toBytes(content, options)));
     return this.noting(() => this.put(p, "open", "write", toText(content, options)));
   }
 
   appendFile(p: string, content: FileContent, options?: WriteFileOptions | BufferEncoding): Promise<void> {
+    if (this.isArtifact(p)) return this.noting(() => this.artifactWrite(p, "append", toBytes(content, options)));
     return this.noting(() => this.put(p, "open", "append", toText(content, options)));
   }
 
@@ -664,6 +816,15 @@ export class NotesFs implements IFileSystem {
 
   private async deleteOne(repo: RepoRow, path: string, p: string) {
     const k = key(repo.id, path);
+    if (underArtifacts(path)) {
+      // committed with the command's other artifact changes (a file only this command wrote just goes)
+      const v = await this.view(repo);
+      if (v.artifacts.has(path)) this.artPending.set(k, { repo, path, bytes: null });
+      else this.artPending.delete(k);
+      this.artRead.delete(k);
+      (await this.repoIndex(repo)).files.delete(path);
+      return;
+    }
     const pend = this.pending.get(k);
     this.pending.delete(k);
     this.remember(k, undefined);
@@ -684,12 +845,15 @@ export class NotesFs implements IFileSystem {
 
   async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
     const n = await this.need(src, "cp");
-    if (n.kind === "file") return this.writeFile(dest, await this.readText(src, "cp"));
+    if (n.kind === "file") return this.writeFile(dest, underArtifacts(n.path) ? await this.artifactBytes(n.repo!, n.path, src, "cp") : await this.readText(src, "cp"));
     if (!options?.recursive) throw new FsError("EISDIR", `illegal operation on a directory, cp '${this.full(src)}'`);
     if (!n.repo) throw new FsError("EPERM", `operation not permitted, cp '${this.full(src)}'`);
     const prefix = n.path ? n.path + "/" : "";
     const files = [...(await this.files(n.repo))].filter((f) => f.startsWith(prefix));
-    for (const f of files) await this.writeFile(`${dest}/${f.slice(prefix.length)}`, (await this.text(n.repo, f)) ?? "");
+    for (const f of files) {
+      const content = underArtifacts(f) ? await this.artifactBytes(n.repo, f, `/${n.repo.id}/${f}`, "cp") : ((await this.text(n.repo, f)) ?? "");
+      await this.writeFile(`${dest}/${f.slice(prefix.length)}`, content);
+    }
     if (!files.length) await this.mkdir(dest, { recursive: true });
   }
 
@@ -716,6 +880,14 @@ export class NotesFs implements IFileSystem {
   }
 
   private async moveOne(repo: RepoRow, path: string, src: string, dest: string) {
+    if (underArtifacts(path) || this.isArtifact(dest)) {
+      // artifacts move as a copy and a delete, committed together when the command ends
+      const content = underArtifacts(path) ? await this.artifactBytes(repo, path, src, "mv") : ((await this.text(repo, path)) ?? "");
+      const to = this.loc(dest);
+      if (to.repo === repo.id && to.path === path) return;
+      await this.writeFile(dest, content);
+      return this.deleteOne(repo, path, src);
+    }
     const to = await this.writableFile(dest, "mv");
     if (to.repo.id === repo.id && to.path === path) return;
     const k = key(repo.id, path);

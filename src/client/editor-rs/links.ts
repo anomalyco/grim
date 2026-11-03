@@ -4,6 +4,7 @@
 
 import { cleanSrc } from "./images.ts";
 import type { RLine } from "./lineview.ts";
+import { ARTIFACTS_DIR } from "../../shared/artifacts.ts";
 
 export type LinkTarget =
   /** http(s) / mailto elsewhere: a new tab. */
@@ -14,6 +15,8 @@ export type LinkTarget =
   | { kind: "heading"; fragment: string }
   /** A file in the notebook (repo-relative path): a Markdown note (`note`), else another file (opened raw). */
   | { kind: "file"; path: string; note: boolean; fragment: string | null }
+  /** A web artifact (under artifacts/, Markdown aside): only Grim for Mac opens it, in its side panel. */
+  | { kind: "artifact"; path: string }
   /** A relative path leaving the notebook. */
   | { kind: "outside"; path: string }
   /** Nothing to open (unsafe scheme, empty). */
@@ -81,6 +84,8 @@ export function linkTarget(raw: string, ctx: LinkContext = {}): LinkTarget {
       parts.pop();
     } else parts.push(seg);
   }
+  // a web artifact (a file or folder under artifacts/, Markdown aside): Grim for Mac's side panel
+  if (parts[0] === ARTIFACTS_DIR && parts.length > 1 && !NOTE_EXT.test(parts[parts.length - 1]!)) return { kind: "artifact", path: parts.join("/") };
   // a folder (or the root) isn't a file
   if (!parts.length || /\/\.{0,2}$/.test(path)) return { kind: "none" };
   const name = parts[parts.length - 1]!;
@@ -88,6 +93,12 @@ export function linkTarget(raw: string, ctx: LinkContext = {}): LinkTarget {
   // no extension: a note ("plan" -> plan.md)
   if (!/\.[^.]+$/.test(name.replace(/^\.+/, ""))) return { kind: "file", path: parts.join("/") + ".md", note: true, fragment };
   return { kind: "file", path: parts.join("/"), note: false, fragment };
+}
+
+/** The tooltip of a link to `raw`: its destination, and for web artifacts where they open. */
+export function linkTitle(raw: string, notePath?: string): string {
+  const dest = linkDest(raw);
+  return linkTarget(raw, { notePath }).kind === "artifact" ? `${dest}: opens in Grim for Mac` : dest;
 }
 
 /** GitHub's heading anchor: lower case, punctuation dropped (letters, numbers, `-`, `_` kept), spaces as `-`. */
