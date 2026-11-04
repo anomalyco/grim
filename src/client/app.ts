@@ -1,5 +1,6 @@
 // App shell: sidebar (repos, file tree, search files), document header, editor session, history, routing.
 import { ARTIFACTS_DIR } from "../shared/artifacts.ts";
+import { isFilePath, withNoteExtension } from "../shared/paths.ts";
 import { uiFontsLoaded } from "./fonts.ts";
 import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
 import { loadReview, reviewLabel, saveReview } from "./review.ts";
@@ -860,7 +861,9 @@ async function openRemote(ref: WorkspaceRef) {
   if (ref.origin === location.origin) {
     let path = ref.path;
     if (path) {
-      if (!MD_EXT.test(path)) path += ".md";
+      path = withNoteExtension(path);
+      // a file (an artifact, an image): the server serves it, in a tab of its own
+      if (isFilePath(path)) return void window.open(urlFor(ref.workspace, path), "_blank", "noopener,noreferrer");
       try {
         const tree = await api.tree(ref.workspace);
         const found = tree.files.includes(path) ? path : tree.files.find((f) => f.toLowerCase() === path!.toLowerCase());
@@ -1360,16 +1363,15 @@ function renderWorkspaceTree(repo: Workspace): HTMLElement {
   ul.setAttribute("role", "tree");
   ul.className = "tree";
   ul.setAttribute("aria-label", `Files in ${repo.title}`);
-  if (loaded.artifacts?.length) ul.appendChild(renderArtifacts(loaded.artifacts.map((a) => a.path)));
+  if (loaded.artifacts?.length) ul.appendChild(renderArtifacts(repo.id, loaded.artifacts.map((a) => a.path)));
   return ul;
 }
 
-/** The workspace's web artifacts (artifacts/): listed, not opened here (Grim for Mac shows them in a side panel). */
-function renderArtifacts(paths: string[]): HTMLElement {
-  const title = "Web artifacts open in Grim for Mac";
+/** The workspace's web artifacts (artifacts/): each opens rendered in a new tab (the server's file URL). */
+function renderArtifacts(repo: string, paths: string[]): HTMLElement {
   return h("li", { role: "none", class: "artifact-list" },
-    h("div", { class: "folder-row artifact-head", title, style: { "--depth": "1" } }, h("span", { class: "folder-name" }, `${ARTIFACTS_DIR} (Grim for Mac)`)),
-    h("ul", { role: "none" }, ...paths.map((p) => h("div", { class: "file-row artifact-row", title: `${p}: opens in Grim for Mac`, style: { "--depth": "2" } }, h("span", { class: "file-name" }, p.slice(ARTIFACTS_DIR.length + 1))))),
+    h("div", { class: "folder-row artifact-head", title: "Web artifacts: each opens in a new tab", style: { "--depth": "1" } }, h("span", { class: "folder-name" }, ARTIFACTS_DIR)),
+    h("ul", { role: "none" }, ...paths.map((p) => h("a", { class: "file-row artifact-row", href: urlFor(repo, p), target: "_blank", rel: "noopener noreferrer", title: `${p}: opens in a new tab`, style: { "--depth": "2" } }, h("span", { class: "file-name" }, p.slice(ARTIFACTS_DIR.length + 1))))),
   );
 }
 
@@ -1965,7 +1967,7 @@ function parseRoute(): { repo: string; path: string | null } | null {
   try {
     const repo = decodeURIComponent(m[1]!);
     let path = m[2] ? m[2].split("/").filter((s) => s && s !== "." && s !== "..").map(decodeURIComponent).join("/") : "";
-    if (path && !MD_EXT.test(path)) path += ".md";
+    path = withNoteExtension(path);
     return { repo, path: path || null };
   } catch {
     return null;
@@ -2122,6 +2124,8 @@ async function route() {
   }
   if (!(await openWorkspace(id))) return;
   if (seq !== routeSeq) return;
+  // a file's URL (an artifact, an image) is the server's to answer, not the app's
+  if (r?.path && isFilePath(r.path)) return location.reload();
   if (r?.path) {
     const canonical = urlFor(id, r.path);
     if (location.pathname !== canonical) navReplace(canonical + location.search + location.hash);
@@ -2252,8 +2256,8 @@ function openLink(s: Session, t: LinkTarget) {
       toast(`“${t.path}” is outside this notebook.`, "error");
       return;
     case "artifact":
-      // web artifacts never open on the web (the server won't serve them to a browser): Grim for Mac's side panel
-      toast(`“${t.path}” is a web artifact: it opens in Grim for Mac.`, "info");
+      // a web artifact: rendered by the server in a tab of its own (on its sandboxed origin); a folder is its index.html
+      window.open(urlFor(s.repo, isFilePath(t.path) ? t.path : `${t.path}/index.html`), "_blank", "noopener,noreferrer");
       return;
     case "file":
       if (!t.note) {

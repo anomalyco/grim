@@ -2826,13 +2826,11 @@ input[type="radio"] {
   max-width: calc(100% - 32px);
 }
 
-/* web artifacts (artifacts/): listed only, Grim for Mac opens them */
-.artifact-list .artifact-head,
-.artifact-list .artifact-row {
+/* web artifacts (artifacts/): a plain heading over links that open each one in a new tab */
+.artifact-list .artifact-head {
   cursor: default;
   color: var(--muted, #888);
 }
-.artifact-list .artifact-row:hover,
 .artifact-list .artifact-head:hover {
   background: none;
 }

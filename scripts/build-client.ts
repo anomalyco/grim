@@ -16,6 +16,9 @@ const files = ["editor_wasm.js", "editor_wasm_bg.wasm"];
 
 mkdirSync(root + "dist/editor-rs", { recursive: true });
 cpSync(root + "src/client/fonts", root + "dist/fonts", { recursive: true });
+// Grim's review kit, which web artifacts load from /_kit/ (served from dist/_kit: src/server/artifact-url.ts)
+mkdirSync(root + "dist/_kit", { recursive: true });
+for (const f of ["review.js", "review.css"]) cpSync(root + `native/crates/app/kit/${f}`, root + `dist/_kit/${f}`);
 let hash = "";
 if (files.every((f) => existsSync(pkg + f))) {
   const h = new Bun.CryptoHasher("sha256");

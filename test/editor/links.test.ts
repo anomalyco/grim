@@ -53,8 +53,16 @@ describe("link targets", () => {
     expect(linkTarget("/artifacts/r/i.html", { notePath: "x/y/a.md" })).toEqual({ kind: "artifact", path: "artifacts/r/i.html" });
     expect(linkTarget("artifacts/notes.md", { notePath: "a.md" }).kind).toBe("file");
     expect(linkTarget("x/artifacts/i.html", { notePath: "a.md" }).kind).toBe("file");
-    expect(linkTitle("artifacts/demo/index.html", "a.md")).toBe("artifacts/demo/index.html: opens in Grim for Mac");
+    expect(linkTitle("artifacts/demo/index.html", "a.md")).toBe("artifacts/demo/index.html: opens in a new tab");
     expect(linkTitle("https://e.com")).toBe("https://e.com");
+  });
+
+  test(".md only when the last segment has no extension (folders with dots don't count)", () => {
+    expect(t("v2.0/plan")).toEqual(note("v2.0/plan.md"));
+    expect(t("Meeting 3.5 notes")).toEqual(note("Meeting 3.5 notes.md"));
+    expect(t("images/a.png").kind).toBe("file");
+    expect(t("data.json")).toMatchObject({ kind: "file", path: "data.json", note: false });
+    expect(t("v1.2")).toMatchObject({ kind: "file", path: "v1.2", note: false });
   });
 
   test("leaving the notebook", () => {

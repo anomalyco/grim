@@ -17,6 +17,7 @@ import { setWsProtocols } from "../server/api.ts";
 import type { McpServer } from "../server/mcp.ts";
 import type { Ctx } from "../server/ops.ts";
 import { isNoteUrl, wantsApp, withVaryAccept } from "../server/note-url.ts";
+import { isArtifactHost, isFileUrl } from "../server/artifact-url.ts";
 import { withShareMeta } from "../server/share-meta.ts";
 import { notePeer } from "../server/proxy.ts";
 import { RepoService, type ImportScheduler } from "../server/repos.ts";
@@ -188,14 +189,17 @@ export function createRouter(opts: RouterOptions = {}) {
     // SIGN_IN=on without a sign-in method (or a bad SIGN_IN): every request says what to set, and nothing else runs
     const problem = signInCheck();
     if (problem) return new Response(`Grim isn't set up: ${problem}\n`, { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
+    // the artifact origin, and rendered artifacts and the review kit here: the shared app only (artifact-url.ts)
+    const artifacts = isArtifactHost(url) || p.startsWith("/_art/") || p.startsWith("/_kit/");
     // a browser on a note URL: the app's index.html from the assets, as before /app/* ran the Worker first (anything
-    // else asking for one gets the note: the shared app, note-url.ts)
-    if ((req.method === "GET" || req.method === "HEAD") && isNoteUrl(p) && wantsApp(req, url)) return withVaryAccept(await assets(req, env));
+    // else asking for one gets the note: the shared app, note-url.ts; a file's URL: artifact-url.ts)
+    if (!artifacts && (req.method === "GET" || req.method === "HEAD") && isNoteUrl(p) && !isFileUrl(p) && wantsApp(req, url)) return withVaryAccept(await assets(req, env));
     const s: Scope = { db: d1Db(env.DB), waitUntil: (promise) => ec.waitUntil(promise) };
     return scope.run(s, async () => {
       try {
         // demo rooms are admitted through the demo's lobby (src/server/demo-rooms.ts)
         useWorkersDemoGate(env);
+        if (artifacts) return (await setup(env).app.fetch(req, noUpgrade)) ?? new Response("Not found", { status: 404 });
         if (p === "/ws") return withServerTiming(await note(req, url, env), isolate);
         const agentWs = req.method === "POST" ? agentWorkspace(p) : null;
         if (agentWs !== null) return await agentCommand(req, env, agentWs);

@@ -14,6 +14,7 @@ import { clientIp } from "./proxy.ts";
 import { DEMO_ROOM_FULL, demoGate, isDemoRoom } from "./demo-rooms.ts";
 import { agentCaller, goneAgentLink, handleAgentGet, handleAgentPost } from "./agent-url.ts";
 import { isNoteUrl, noteUrlResponse, wantsApp, withVaryAccept } from "./note-url.ts";
+import { artifactHostResponse, fileUrlResponse, isFileUrl } from "./artifact-url.ts";
 import { MAC_DOWNLOAD_ASSET, MAC_DOWNLOAD_PATH } from "../shared/mac-download.ts";
 import type { Participant } from "./rooms.ts";
 import type { AdmittedWorkspace, WsDecision, WsReject } from "./seams/workspace-host.ts";
@@ -193,6 +194,9 @@ export function createApp(deps: AppDeps) {
     const url = new URL(req.url);
     const p = url.pathname;
     try {
+      // rendered web artifacts and the review kit; everything on the artifact origin (artifact-url.ts)
+      const art = await artifactHostResponse(req, url, ctx, deps.staticFile);
+      if (art) return art;
       if (p === "/ws") {
         if (!url.searchParams.has("path") && upgrader.workspace) {
           if (upgrader.workspace(req, await admitSocket(db, req, url))) return undefined;
@@ -231,6 +235,8 @@ export function createApp(deps: AppDeps) {
       if (p === "/" && !config.marketingSite) return new Response(null, { status: 302, headers: { location: "/app" + url.search } });
       // the app's note URLs: for anything but a browser, the workspace's agent instructions and changes (agent-url.ts)
       // or the note itself (note-url.ts); else the app
+      // a file's URL (an artifact, an image): the file, for browsers and everyone else (artifact-url.ts)
+      if (isFileUrl(p)) return await fileUrlResponse(req, url, ctx);
       if (isNoteUrl(p)) return wantsApp(req, url) ? withVaryAccept(await deps.staticFile(req, url)) : ((await handleAgentGet(req, url, ctx)) ?? (await noteUrlResponse(req, url, ctx)));
       return await deps.staticFile(req, url);
     } catch (e) {

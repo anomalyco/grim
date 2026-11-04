@@ -366,7 +366,7 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       // The head from the workspace's runtime, which makes the commits (on Workers the Worker's own cache never hears of them).
       const host = ctx.repos.host.get(repo.id);
       const [files, head, arts] = await Promise.all([ctx.repos.tree(repo), host.head(repo), host.artifacts(repo)]);
-      // Web artifacts (artifacts/, shared/artifacts.ts) with their sizes: listed, opened only by Grim for Mac.
+      // Web artifacts (artifacts/, shared/artifacts.ts) with their sizes: opened by their note URLs (artifact-url.ts).
       const artifacts = arts.map((f) => ({ path: f.path, size: f.size }));
       // The tree is the committed files at the head plus the notes not saved yet, so a hash of the body is its version.
       const text = JSON.stringify({ head, files, artifacts });

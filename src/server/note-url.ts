@@ -1,8 +1,8 @@
 // Content negotiation on the app's note URLs (/app/<workspace>/<note path>): a browser (Accept names text/html) gets
 // the app as before; anything else (curl's */*, text/markdown, text/plain) gets the note itself: its Markdown as the
-// app shows it (live edits not saved yet included), a folder's notes one path per line, an image's bytes. What it
-// reads is exactly what GET /api/workspace/:id/file, /tree and /raw answer anyone who isn't signed in.
-import { rawResponse } from "./api.ts";
+// app shows it (live edits not saved yet included), a folder's notes one path per line. What it reads is exactly what
+// GET /api/workspace/:id/file and /tree answer anyone who isn't signed in. A URL whose last segment has an extension
+// other than Markdown's is a file's (an artifact, an image): artifact-url.ts.
 import { config } from "./config.ts";
 import { isDemoRoom } from "./demo-rooms.ts";
 import { DEMO_ID } from "./demo.ts";
@@ -11,7 +11,6 @@ import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath } from "./repos.ts";
 import { isUnfurler } from "./share-meta.ts";
-import { underArtifacts } from "../shared/artifacts.ts";
 import { readerKey } from "./agent-url.ts";
 import { readVersion } from "./instructions.ts";
 
@@ -79,17 +78,9 @@ export async function noteUrlResponse(req: Request, url: URL, ctx: Ctx): Promise
     const repo = await ctx.repos.get(id);
     if (!repo) return notFound(id);
     if (repo.status !== "ready") return text(repo.status === "importing" ? `${repo.id} is still importing\n` : `${repo.id}: ${repo.error ?? repo.status}\n`, 409);
-    // a web artifact: never served here (only Grim for Mac reads them, through the raw API with its token)
-    if (underArtifacts(path)) return text(`${path} is a web artifact: it opens in Grim for Mac's side panel.\n`, 404);
-    const ext = /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase() ?? "";
-    // an image the notes show: its bytes, served as the raw route does (its type, never sniffed; SVGs sandboxed)
-    if (ops.IMAGE_TYPES[ext]) {
-      const res = rawResponse(await ops.readRaw(ctx, repo, path));
-      res.headers.set("vary", "Accept");
-      return res;
-    }
+    // (a file's URL, whose last segment has an extension, is answered before: artifact-url.ts)
     if (path) {
-      // a note, with .md added when the path has no Markdown extension (as the app's links resolve); the live text
+      // a note, with .md added when the last segment has no extension (shared/paths.ts); the live text
       const note = cleanPath(path);
       if (!note) return notFound(path);
       const read = await ops.readFile(ctx, repo, note).catch((e: unknown) => {

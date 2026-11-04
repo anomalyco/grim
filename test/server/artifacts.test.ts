@@ -1,6 +1,7 @@
 // Web artifacts (artifacts/, shared/artifacts.ts): agents write them with the shell (text and bytes, one commit per
 // command), only web file types, no executables, size caps; Markdown rules elsewhere unchanged; the raw API hands
-// them only to token-authenticated app clients, as downloads; browsers never get them rendered.
+// them only to token-authenticated app clients, as downloads; browsers get them rendered only sandboxed, under a signed
+// /_art/ path (artifact-url.ts).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { isolate } from "./helpers.ts";
 
@@ -111,11 +112,63 @@ describe("artifacts", () => {
     expect((await raw("artifacts/demo/index.html", { cookie, accept: "text/html" })).status).toBe(403);
     // images under artifacts/ aren't served as images either
     expect((await raw("artifacts/demo/logo.png", { cookie })).status).toBe(403);
-    // the note URL answers a plain message, never the file
+    // the note URL, from a non-browser: a download, never rendered on this origin
     const page = await fetch(`${base}/app/${ws}/artifacts/demo/index.html`, { headers: { accept: "*/*" } });
-    expect(page.status).toBe(404);
-    expect(page.headers.get("content-type")).toStartWith("text/plain");
-    expect(await page.text()).toContain("Grim for Mac");
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toBe("application/octet-stream");
+    expect(page.headers.get("content-disposition")).toStartWith("attachment");
+  });
+
+  test("a browser on an artifact's note URL is sent to it rendered: sandboxed, assets beside it, a token in the path", async () => {
+    const nav = { accept: "text/html,*/*;q=0.8", "sec-fetch-dest": "document" };
+    const res = await fetch(`${base}/app/${ws}/artifacts/demo/index.html`, { headers: nav, redirect: "manual" });
+    expect(res.status).toBe(302);
+    const loc = new URL(res.headers.get("location")!);
+    // no ARTIFACT_URL here: this origin, under /_art/<workspace>/<token>/
+    expect(loc.pathname).toMatch(new RegExp(`^/_art/${ws}/[0-9a-z]+\\.[\\w-]{22}/artifacts/demo/index\\.html$`));
+    const page = await fetch(loc, { headers: nav });
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    const csp = page.headers.get("content-security-policy")!;
+    expect(csp).toStartWith("sandbox allow-scripts");
+    expect(csp).not.toContain("allow-same-origin");
+    expect(page.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(page.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(await page.text()).toContain("<h1>Hi</h1>");
+    // relative assets resolve beside it, without cookies
+    const css = await fetch(new URL("style.css", loc));
+    expect(css.headers.get("content-type")).toBe("text/css; charset=utf-8");
+    expect(css.headers.get("access-control-allow-origin")).toBe("*");
+    expect(await css.text()).toContain("h1{color:red}");
+    const png = await fetch(new URL("logo.png", loc));
+    expect(png.headers.get("content-type")).toBe("image/png");
+    // a folder: its index.html
+    const dir = await fetch(new URL("../demo", loc), { redirect: "manual" });
+    expect(dir.status).toBe(302);
+    expect(dir.headers.get("location")).toEndWith("/artifacts/demo/index.html");
+    // another workspace's token, a forged or expired one: refused (a page is sent back for a new one)
+    const other = loc.pathname.replace(`/_art/${ws}/`, "/_art/someone-else/");
+    expect((await fetch(new URL(other, loc))).status).toBe(403);
+    const forged = loc.pathname.replace(/\/_art\/([^/]+)\/([0-9a-z]+)\.[\w-]+\//, "/_art/$1/$2.AAAAAAAAAAAAAAAAAAAAAA/");
+    expect((await fetch(new URL(forged, loc))).status).toBe(403);
+    const expired = loc.pathname.replace(/\/_art\/([^/]+)\/[0-9a-z]+\./, "/_art/$1/1.");
+    expect((await fetch(new URL(expired, loc))).status).toBe(403);
+    const again = await fetch(new URL(expired, loc), { headers: nav, redirect: "manual" });
+    expect(again.status).toBe(302);
+    expect(again.headers.get("location")).toEndWith(`/app/${ws}/artifacts/demo/index.html`);
+    // the review kit, for pages that load /_kit/review.js
+    const kit = await fetch(`${base}/_kit/review.js`);
+    expect(kit.status).toBe(200);
+    expect(await kit.text()).toContain("grim-diff");
+  });
+
+  test("note URLs: .md added only without an extension; files 404 when missing", async () => {
+    const nav = { accept: "text/html" };
+    // a note URL without an extension is still the app (and a note to curl)
+    expect((await fetch(`${base}/app/${ws}/plan`, { headers: nav })).headers.get("content-type")).toStartWith("text/html");
+    expect((await fetch(`${base}/app/${ws}/missing.html`, { headers: nav })).status).toBe(404);
+    expect((await fetch(`${base}/app/${ws}/artifacts/demo/nope.css`, { headers: nav, redirect: "manual" })).status).toBe(404);
+    expect((await fetch(`${base}/app/no-such-workspace/artifacts/demo/index.html`, { headers: nav, redirect: "manual" })).status).toBe(404);
   });
 
   test("review artifacts: .diff/.patch files, and an artifact's history names the session that wrote it", async () => {
