@@ -30,7 +30,7 @@ export interface DomPos {
 }
 
 function isAtomic(el: Element): boolean {
-  return el.classList.contains("tok") || el.classList.contains("chip") || el.classList.contains("wchip");
+  return el.classList.contains("tok") || el.classList.contains("chip");
 }
 
 function isVisibleText(el: Element): boolean {

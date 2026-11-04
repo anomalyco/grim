@@ -96,8 +96,8 @@ export class DomLayout implements JsLayout {
     cx = Math.max(0, Math.min(window.innerWidth - 1, cx));
     // on a line-prefix token (indent, bullet, number, quote bar): its nearer edge (the native hit inside a
     // non-editable token depends on where its glyph sits in it, and on the y within the line). A todo's box
-    // goes to the text start, as the native hit does. A widget's chip (widgets.ts): its nearer edge too.
-    const tok = document.elementFromPoint(cx, cy)?.closest<HTMLElement>(".tok:not(.tok-todo), .wchip");
+    // goes to the text start, as the native hit does.
+    const tok = document.elementFromPoint(cx, cy)?.closest<HTMLElement>(".tok:not(.tok-todo)");
     if (tok && this.host.root.contains(tok) && tok.dataset.f !== undefined && tok.dataset.t !== undefined) {
       const li = lineIndexOf(this.host.root, lineDivOf(this.host.root, tok));
       const line = this.host.doc.lines[li];

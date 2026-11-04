@@ -9,7 +9,6 @@
 import { directImages, type ImageResolver } from "./images.ts";
 import type { RLine, SegKind, TokenKind } from "./lineview.ts";
 import { lineLinks } from "./links.ts";
-import { lineWidgets, renderWidget, type WidgetMatch } from "./widgets.ts";
 
 const PENCIL =
   '<svg viewBox="0 0 16 16" width="0.85em" height="0.85em" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M10.5 2.5l3 3L6 13H3v-3z"/><path d="M9 4l3 3"/></svg>';
@@ -123,8 +122,6 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
     }
   };
   if (split) nextPart();
-  // inline widgets (`<session id=… />`): a chip, then the tag's source collapsed (widgets.ts)
-  const widgets = lineWidgets(line, text);
   // a link's URL (chip segments) waiting for its ")": the pencil goes before it
   let url: number | null = null;
   for (const s of line.segs) {
@@ -144,11 +141,6 @@ export function renderRLine(line: RLine, text: string, opts: RenderOptions = {})
     } else if (opts.code && s.kind === "text" && !s.hidden && s.to > s.from) {
       codeRuns(parent, s.from, s.to, s.cls, raw, opts.code.runs);
       lastIsText = true;
-      continue;
-    } else if (s.kind === "text" && !s.hidden && widgets.some((w) => w.from < s.to && s.from < w.to)) {
-      widgetPieces(s.cell !== undefined && table ? cellFor(s.cell) : parent, s.from, s.to, s.cls, text, widgets);
-      lastIsText = true;
-      url = null;
       continue;
     } else {
       if (url !== null && s.kind === "mk" && raw === ")") {
@@ -202,29 +194,6 @@ function addImageLinkChips(imgs: HTMLElement, line: RLine, text: string): void {
     chip.dataset.at = inside[inside.length - 1]!.dataset.at;
     imgs.appendChild(chip);
   }
-}
-
-/**
- * Text segment [from, to) holding (parts of) widgets: its text outside them as text spans; each widget starting in
- * it as its chip followed by its source, collapsed (`.mk.wsrc`: in the DOM for the offset mapping, never shown).
- */
-function widgetPieces(parent: HTMLElement, from: number, to: number, cls: string[], text: string, widgets: WidgetMatch[]): void {
-  let at = from;
-  const piece = (end: number, source: boolean) => {
-    const node = renderTextSeg("text", cls, text.slice(at, end));
-    if (source) node.className = ["mk", "wsrc", ...cls].join(" ");
-    node.dataset.f = String(at);
-    node.dataset.t = String(end);
-    parent.appendChild(node);
-    at = end;
-  };
-  for (const w of widgets) {
-    if (w.to <= at || w.from >= to) continue;
-    if (w.from > at) piece(w.from, false);
-    if (w.from >= from) parent.appendChild(renderWidget(w));
-    piece(Math.min(w.to, to), true);
-  }
-  if (at < to) piece(to, false);
 }
 
 /** Text segment [from, to) (`raw`) as spans split at the highlighting runs. */

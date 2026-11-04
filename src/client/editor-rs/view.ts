@@ -15,7 +15,7 @@ import { AuthorGutter } from "./authors.ts";
 import { sigOf, toRLine, type RLine } from "./lineview.ts";
 import { applyLineReveal, collectImages, renderRLine, type CodeHl, type ImagePool, type RLineDiv } from "./render.ts";
 import { CodeHighlight, type CodeHost } from "./code.ts";
-import { blockClip, blockRoom, dropStrays, groupBlocks, INSTR_BLOCK, isBlock, lineDivOf, lineDivs, lineIndexOf, placeAfter, scrollBlockTo } from "./blocks.ts";
+import { blockClip, blockRoom, dropStrays, groupBlocks, INSTR_BLOCK, isBlock, lineDivOf, lineDivs, placeAfter, scrollBlockTo } from "./blocks.ts";
 import { instructionsBlockAt } from "../../shared/instructions.ts";
 import { applyEdits } from "./edits.ts";
 import { DomLayout, scrollBy, scrollToEdge, visibleBounds } from "./layout.ts";
@@ -24,7 +24,6 @@ import type { CollabView, RustCollab } from "./collab.ts";
 import { crashSafe, guardEngine } from "./guard.ts";
 import type { Edit, Engine, EngineFactory, LineViewJs, Patch, PatchLines } from "./types.ts";
 import { findHeading, lineLinks, linkTarget, visibleText, type LineLink, type LinkTarget } from "./links.ts";
-import { knownSessions, lineWidgets, widgetAround, type WidgetMatch } from "./widgets.ts";
 
 export type RustViewOptions = {
   readOnly?: boolean;
@@ -123,10 +122,6 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   private authors: AuthorGutter | null = null;
   /** The patch being applied came from the others (remotePatch). */
   private remoteApply = false;
-  /** Each line view's widgets (widgets.ts), with the text they were found in. */
-  private widgetCache = new WeakMap<RLine, { text: string; widgets: WidgetMatch[] }>();
-  /** Some widget chip is drawn as selected (.insel). */
-  private chipsSelected = false;
 
   constructor(
     readonly container: HTMLElement,
@@ -180,10 +175,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.code = new CodeHighlight(this);
     if (opts.collab) {
       this.authors = new AuthorGutter(this, opts.collab.user as { id: string; name: string; color: string; kind?: string }, opts.onReview);
-      if (opts.collab.blame) {
-        this.authors.set(opts.collab.blame);
-        knownSessions.learnUsers(opts.collab.blame.authors);
-      }
+      if (opts.collab.blame) this.authors.set(opts.collab.blame);
     }
     this.foldKey = opts.collab ? foldStorageKey(opts.collab.repo, opts.collab.path) : opts.foldKey ? `grimoire.folds:${opts.foldKey}` : null;
 
@@ -230,7 +222,6 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
    */
   apply(p: Patch | undefined, opts: { remote?: Edit[] } = {}): void {
     if (!p || this._destroyed) return;
-    const prevHead = this.sel.head;
     // remote patches: the text edits came from the LocalSync and are already in doc.text
     const edits = opts.remote ?? p.edits;
     const before = this.doc.text;
@@ -263,82 +254,6 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.cursors.schedule();
     this.authors?.schedule();
     this.drops?.redraw();
-    this.markSelectedWidgets();
-    if (!this.composing) this.snapOutOfWidgets(prevHead);
-  }
-
-  // ---------------------------------------------------------------------------------------------
-  // Inline widgets (widgets.ts): atomic chips
-
-  /** Line `li`'s widgets (line-relative ranges). */
-  widgetsOf(li: number): WidgetMatch[] {
-    const line = this.lines[li];
-    if (!line || this.doc.lines.length !== this.lines.length) return [];
-    const text = this.lineText(li);
-    const c = this.widgetCache.get(line);
-    if (c && c.text === text) return c.widgets;
-    const widgets = lineWidgets(line, text);
-    this.widgetCache.set(line, { text, widgets });
-    return widgets;
-  }
-
-  /** The widget with absolute position `pos` strictly inside, as an absolute range. */
-  private widgetAt(pos: number): { from: number; to: number } | null {
-    if (this.doc.lines.length !== this.lines.length) return null;
-    const li = lineAt(this.doc.lines, pos);
-    const base = this.doc.lines[li]!.from;
-    const w = widgetAround(this.widgetsOf(li), pos - base);
-    return w ? { from: base + w.from, to: base + w.to } : null;
-  }
-
-  /**
-   * The caret never stops inside a widget's tag: a selection end that landed in one goes to the edge it was moving
-   * toward (a still caret, e.g. a remote edit: the nearer one); a selection's anchor takes in the whole tag.
-   */
-  private snapOutOfWidgets(prevHead: number): void {
-    const { anchor, head } = this.sel;
-    const wh = this.widgetAt(head);
-    const wa = anchor === head ? wh : this.widgetAt(anchor);
-    if (!wh && !wa) return;
-    let h = head;
-    if (wh) {
-      const forward = head > prevHead || (head === prevHead && wh.to - head <= head - wh.from);
-      h = forward ? wh.to : wh.from;
-    }
-    let a = anchor === head ? h : anchor;
-    if (wa && anchor !== head) a = anchor < head ? wa.from : wa.to;
-    if (a === anchor && h === head) return;
-    this.apply(this.engine.set_selection(a, h));
-  }
-
-  /**
-   * Backspace right after a widget's tag (Delete right before one) removes the whole tag; false: no widget there
-   * (the engine handles the key).
-   */
-  deleteWidget(backward: boolean): boolean {
-    if (this.readOnly || this.composing || this.sel.anchor !== this.sel.head || this.doc.lines.length !== this.lines.length) return false;
-    const pos = this.sel.head;
-    const li = lineAt(this.doc.lines, pos);
-    const base = this.doc.lines[li]!.from;
-    const rel = pos - base;
-    const w = this.widgetsOf(li).find((w) => (backward ? w.to === rel : w.from === rel));
-    if (!w) return false;
-    this.apply(this.engine.replace_range(base + w.from, base + w.to, ""));
-    return true;
-  }
-
-  /** Chips inside the selection are drawn selected (they hold no text for the browser's selection to paint). */
-  private markSelectedWidgets(): void {
-    const from = Math.min(this.sel.anchor, this.sel.head);
-    const to = Math.max(this.sel.anchor, this.sel.head);
-    if (from === to && !this.chipsSelected) return;
-    this.chipsSelected = false;
-    for (const chip of this.root.querySelectorAll<HTMLElement>(".wchip")) {
-      const span = this.doc.lines[lineIndexOf(this.root, lineDivOf(this.root, chip))];
-      const on = !!span && from < to && from <= span.from + Number(chip.dataset.f) && span.from + Number(chip.dataset.t) <= to;
-      chip.classList.toggle("insel", on);
-      if (on) this.chipsSelected = true;
-    }
   }
 
   get destroyed(): boolean {
@@ -665,9 +580,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
 
   /** The room sent new line authors. */
   blameChanged(): void {
-    if (!this.collab?.blame) return;
-    this.authors?.set(this.collab.blame);
-    knownSessions.learnUsers(this.collab.blame.authors);
+    if (this.collab?.blame) this.authors?.set(this.collab.blame);
   }
 
   /** The engine rebuilt its editor from the shared document. */
@@ -679,8 +592,6 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   }
 
   cursorsChanged(): void {
-    // agents' sessions and titles, for session widgets
-    if (this.collab) for (const [, state] of this.collab.peerStates()) knownSessions.learnUsers([(state as { user?: unknown } | null)?.user]);
     this.cursors.schedule();
   }
 
@@ -912,16 +823,10 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
         if (r.width > 0.5 && r.height > 1) out.push(r);
       }
     }
-    // collapsed images entirely in the range: their source shows nothing, so the image itself is highlighted (and
-    // widget chips: their tags show nothing either)
+    // collapsed images entirely in the range: their source shows nothing, so the image itself is highlighted
     for (let li = first; li < this.lines.length && this.doc.lines[li]!.from <= to; li++) {
       const base = this.doc.lines[li]!.from;
       const line = this.lines[li]!;
-      for (const chip of lineDivs(this.root)[li]?.querySelectorAll<HTMLElement>(".wchip") ?? []) {
-        if (base + Number(chip.dataset.f) < from || base + Number(chip.dataset.t) > to) continue;
-        const r = chip.getBoundingClientRect();
-        if (r.width > 0.5 && r.height > 1) out.push(r);
-      }
       for (const box of lineDivs(this.root)[li]?.querySelectorAll<HTMLElement>(".imgbox") ?? []) {
         const f = Number(box.dataset.from);
         const t = Number(box.dataset.at);
