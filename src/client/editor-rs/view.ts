@@ -836,7 +836,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.lines.forEach((l, i) => {
       if (l.type !== "heading") return;
       idx.push(i);
-      texts.push(visibleText(l, this.lineText(i), this.widgetsOf(i)));
+      texts.push(visibleText(l, this.lineText(i)));
     });
     const k = findHeading(texts, fragment);
     if (k < 0) return false;

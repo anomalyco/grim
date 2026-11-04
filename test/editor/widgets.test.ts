@@ -2,8 +2,7 @@
 // session chip's labels and the known-sessions source.
 import { describe, expect, test } from "bun:test";
 import { findWidgets, isWidget } from "../../src/shared/widgets.ts";
-import { KnownSessions, knownSessions, lineWidgets, subagentLabel, truncate, widgetAround, withWidgetLabels } from "../../src/client/editor-rs/widgets.ts";
-import { visibleText } from "../../src/client/editor-rs/links.ts";
+import { KnownSessions, lineWidgets, subagentLabel, truncate, widgetAround } from "../../src/client/editor-rs/widgets.ts";
 import type { RLine, RSeg } from "../../src/client/editor-rs/lineview.ts";
 
 const names = (s: string) => findWidgets(s).map((w) => [w.name, w.attrs, s.slice(w.from, w.to)]);
@@ -78,20 +77,5 @@ describe("session chip", () => {
     k.learnUsers([{ session: "ses_a", sessionName: "Fix it" }]);
     expect(seen).toEqual(["ses_a"]);
     expect(k.get("ses_b")).toBeUndefined();
-  });
-});
-
-describe("widgets as text", () => {
-  test("withWidgetLabels: a session's title or id, not in inline code", () => {
-    knownSessions.learn("ses_t", "Trip plans");
-    expect(withWidgetLabels('# <session id="ses_t" />')).toBe("# Trip plans");
-    expect(withWidgetLabels("# Work: <session id='ses_unknown' />")).toBe("# Work: ses_unknown");
-    expect(withWidgetLabels('# `<session id="ses_t" />` and <foo />')).toBe('# `<session id="ses_t" />` and <foo />');
-  });
-  test("visibleText of a heading line view: the widget as its label", () => {
-    const text = '## Work: <session id="ses_unknown2" />';
-    const l = line([seg("token", 0, 3), seg("text", 3, text.length)], { type: "heading", level: 2 });
-    expect(visibleText(l, text, lineWidgets(l, text))).toBe("Work: ses_unknown2");
-    expect(visibleText(l, text)).toBe('Work: <session id="ses_unknown2" />');
   });
 });

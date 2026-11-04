@@ -244,54 +244,34 @@
 .mde.readonly .chip::before { content: none; }
 .mde.readonly .chip svg, .mde.readonly .img-chip { display: none; }
 .mde .part.nil .chip { font-size: 0; padding: 0; }
-/* inline widgets (widgets.ts): an atomic chip in place of the tag, whose source stays collapsed (.mk.wsrc).
-   Everything is in em of the chip's font, which follows the line's (a paragraph's, a heading's): it scales with its
-   line. Its vertical padding is cancelled by negative margins, so a chip never makes its line taller, and it sits on
-   the line's baseline (an inline-block's baseline is its text's; no overflow clipping, which would move it to the
-   bottom edge: widgets.ts cuts long titles). Grim for Mac draws it to the same proportions. */
+/* inline widgets (widgets.ts): an atomic chip in place of the tag, whose source stays collapsed (.mk.wsrc) */
 .mde .wchip {
-  --wchip-ink: var(--mde-text-light);
   display: inline-block;
   max-width: 100%;
-  padding: 0.12em 0.45em;
-  margin: -0.12em 0.06em;
-  border-radius: 0.375em;
+  padding: 0 7px;
+  margin: 0 1px;
+  border-radius: 6px;
   background: var(--mde-bg2);
-  color: var(--wchip-ink);
+  color: var(--mde-text-light);
   font-size: 0.875em;
   font-weight: 500;
   font-style: normal;
   line-height: 1.5;
   text-indent: 0;
   white-space: nowrap;
-  vertical-align: baseline;
+  /* (no overflow clipping: it would move the chip's baseline to its bottom edge; widgets.ts cuts long titles) */
   user-select: none;
   -webkit-user-select: none;
   cursor: default;
 }
 .mde .wchip.insel { background: var(--mde-selection); box-shadow: inset 0 0 0 1px rgba(41, 109, 154, 0.35); }
-.mde .wchip::before { content: "\25C6"; margin-right: 0.4em; font-size: 0.8em; color: var(--mde-marker); vertical-align: 0.08em; }
+.mde .wchip::before { content: "\25C6"; margin-right: 5px; font-size: 0.8em; color: var(--mde-marker); vertical-align: 0.08em; }
 .mde .w-session:not(.known) .wt { font-family: var(--mde-mono); font-weight: 400; font-size: 0.95em; }
 .mde .wchip :is(.wt, .wc)::before { content: attr(data-v); }
 .mde .wchip .wc { color: var(--mde-marker); font-weight: 400; }
-/* in a heading: a section title. The heading's own size, weight, colour and tracking (the chip is a little smaller
-   than the text so its tint fits the heading's tight leading), a smaller diamond, the count small and muted. */
-.mde .ln-heading .wchip {
-  --wchip-ink: var(--mde-heading);
-  font-size: 0.94em;
-  font-weight: inherit;
-  letter-spacing: inherit;
-  line-height: 1.15;
-  padding: 0.06em 0.3em;
-  margin: -0.06em 0.04em;
-  border-radius: 0.24em;
-}
-.mde .ln-heading .wchip::before { font-size: 0.5em; margin-right: 0.5em; vertical-align: 0.3em; }
-.mde .ln-heading .w-session:not(.known) .wt { font-weight: 600; font-size: 0.9em; letter-spacing: -0.01em; }
-.mde .ln-heading .wchip .wc { font-size: 0.6em; letter-spacing: 0; }
 /* a running session's title / a running subagent's count: a light sweeping over the text */
 .mde .wchip :is(.wt, .wc).busy {
-  background-image: linear-gradient(100deg, var(--wchip-ink) 0%, var(--wchip-ink) 32%, #d0d0d8 50%, var(--wchip-ink) 68%, var(--wchip-ink) 100%);
+  background-image: linear-gradient(100deg, var(--mde-text-light) 0%, var(--mde-text-light) 32%, #d0d0d8 50%, var(--mde-text-light) 68%, var(--mde-text-light) 100%);
   background-size: 250% 100%;
   background-position: 100% 0;
   -webkit-background-clip: text;
@@ -299,7 +279,6 @@
   color: transparent;
   animation: mde-shimmer 1.8s linear infinite;
 }
-.mde .wchip .wc.busy { --wchip-ink: var(--mde-marker); }
 @keyframes mde-shimmer { from { background-position: 100% 0; } to { background-position: -150% 0; } }
 @media (prefers-reduced-motion: reduce) {
   /* no sweep: the text in the accent colour instead */
