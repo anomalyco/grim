@@ -2,6 +2,7 @@
 import { ARTIFACTS_DIR } from "../shared/artifacts.ts";
 import { uiFontsLoaded } from "./fonts.ts";
 import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
+import { knownSessions } from "./editor-rs/widgets.ts";
 import { loadReview, reviewLabel, saveReview } from "./review.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { warmCode } from "./editor-rs/code.ts";
@@ -995,6 +996,8 @@ function onEvent(e: AppEvent) {
       break;
     case "presence": {
       const key = fkey(e.repo, e.path);
+      // agents' sessions and titles (presence carries them), for session widgets
+      knownSessions.learnUsers(e.users);
       const users = (Array.isArray(e.users) ? e.users : []).map(validPeerUser).filter((u) => u !== null);
       const before = peerSignature(presence.get(key));
       if (users.length) presence.set(key, users);

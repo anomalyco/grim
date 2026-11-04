@@ -129,10 +129,10 @@ export function attachRustInput(v: RustEditorView): () => void {
         key("Enter", SHIFT);
         break;
       case "deleteContentBackward":
-        key("Backspace");
+        if (!v.deleteWidget(true)) key("Backspace");
         break;
       case "deleteContentForward":
-        key("Delete");
+        if (!v.deleteWidget(false)) key("Delete");
         break;
       case "deleteWordBackward":
         key("Backspace", ALT);
@@ -192,6 +192,11 @@ export function attachRustInput(v: RustEditorView): () => void {
     }
     const k = foldKey(e) ?? translateKey(e);
     if (!k) return;
+    // Backspace after a widget's tag / Delete before one (also by word): the whole tag goes
+    if ((k.key === "Backspace" || k.key === "Delete") && !(k.mods & (META | CTRL)) && v.deleteWidget(k.key === "Backspace")) {
+      e.preventDefault();
+      return;
+    }
     const p = engine.key(k.key, k.mods, layout);
     if (!p) return;
     e.preventDefault();
