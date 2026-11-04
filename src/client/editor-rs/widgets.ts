@@ -143,6 +143,30 @@ function sessionChanged(id: string | null): void {
   updateWidgets("session", id === null ? undefined : (chip) => chip.dataset.id === id);
 }
 
+/** A widget as plain text (what it shows): a session's title, else its id. */
+export function widgetLabel(w: Pick<WidgetMatch, "name" | "attrs">): string {
+  if (w.name === "session") {
+    const id = w.attrs.id?.trim() ?? "";
+    return source.get(id)?.title?.trim() || id;
+  }
+  return "";
+}
+
+/**
+ * `line` (Markdown) with its widget tags replaced by what they show (widgetLabel), for whatever reads a line as
+ * text (naming a note after its heading). Tags in inline code (after an odd number of backtick runs) stay.
+ */
+export function withWidgetLabels(line: string): string {
+  let out = "";
+  let at = 0;
+  for (const w of findWidgets(line)) {
+    if ((line.slice(0, w.from).match(/`+/g)?.length ?? 0) % 2) continue;
+    out += line.slice(at, w.from) + widgetLabel(w);
+    at = w.to;
+  }
+  return out + line.slice(at);
+}
+
 /** Longest title shown (then "…"); the full one is in the tooltip. */
 const MAX_TITLE = 48;
 

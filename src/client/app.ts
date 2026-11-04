@@ -2,7 +2,7 @@
 import { ARTIFACTS_DIR } from "../shared/artifacts.ts";
 import { uiFontsLoaded } from "./fonts.ts";
 import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
-import { knownSessions } from "./editor-rs/widgets.ts";
+import { knownSessions, withWidgetLabels } from "./editor-rs/widgets.ts";
 import { loadReview, reviewLabel, saveReview } from "./review.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { warmCode } from "./editor-rs/code.ts";
@@ -3017,7 +3017,9 @@ class Session {
     const firstLine = text?.indexOf("\n") ?? -1;
     if (!text || !sel || firstLine < 0 || sel.head <= firstLine) return;
     const tree = trees.get(this.repo);
-    const to = autoNamePath(this.path, text, tree && !("error" in tree) ? tree.files : []);
+    // (a widget in the heading names it after what it shows: `# <session id=… />` → the session's title, or its id)
+    const named = withWidgetLabels(text.slice(0, firstLine)) + text.slice(firstLine);
+    const to = autoNamePath(this.path, named, tree && !("error" in tree) ? tree.files : []);
     if (!to || to === this.path) return;
     this.renamingTo = to;
     api.rename(this.repo, this.path, to, true).then(

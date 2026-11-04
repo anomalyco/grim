@@ -194,6 +194,94 @@ await view(() => window.grimWidgets.setSessionSource(null));
 st = await state();
 check("back to Grim's source: the id again", st.title === "ses_x" && !st.titleBusy, JSON.stringify(st));
 
+// headings: the chip as a section title, h1–h3 and a paragraph, with a known title and with only the id
+const HEAD = [
+  '# <session id="ses_named" />',
+  "# Plain h1",
+  '## Work: <session id="ses_named" />',
+  "## Plain h2",
+  '### <session id="ses_x" /> notes',
+  "### Plain h3",
+  'Paragraph: <session id="ses_named" /> and <session id="ses_x" />',
+  "Plain paragraph",
+  '## Id only: <session id="ses_x" />',
+  "",
+].join("\n");
+const hf = await page.evaluate(async ([id, note]) => (await fetch(`/api/workspace/${id}/files`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "Headings.md", content: note }) })).status, [ws.id, HEAD]);
+check("headings note created", hf === 201 || hf === 200, String(hf));
+await page.goto(`${BASE}/app/${ws.id}/Headings.md`);
+await page.waitForFunction(() => document.querySelectorAll(".mde .wchip").length >= 6, null, { timeout: 15000 });
+const headMock = (busy) =>
+  view((busy) => {
+    window.grimWidgets.setSessionSource({
+      get: (id) => (id === "ses_named" ? { id, title: "Refactor the sync engine", busy, subagents: 3, subagentsBusy: busy } : undefined),
+      subscribe: () => () => {},
+    });
+  }, busy);
+await headMock(false);
+await sleep(300);
+const metrics = await view(() => {
+  const lines = [...document.querySelectorAll(".mde .ln")];
+  return lines.map((ln) => {
+    const chip = ln.querySelector(".wchip");
+    const r = ln.getBoundingClientRect();
+    if (!chip) return { h: Math.round(r.height) };
+    // baselines: an inline-block's baseline and a text's are where a zero-height inline-block placed after them sits
+    const probe = (el) => {
+      const p = document.createElement("span");
+      p.style.cssText = "display:inline-block;width:0;height:0;vertical-align:baseline";
+      el.after(p);
+      const y = p.getBoundingClientRect().top;
+      p.remove();
+      return y;
+    };
+    const text = [...ln.querySelectorAll(".t")].find((t) => t.textContent.trim() && !t.classList.contains("ws"));
+    return { h: Math.round(r.height), chipBase: probe(chip.querySelector(".wt")), textBase: text ? probe(text) : null, font: parseFloat(getComputedStyle(chip).fontSize), lineFont: parseFloat(getComputedStyle(ln).fontSize) };
+  });
+});
+const sameH = (a, b, name) => check(`${name}: a chip doesn't change the line's height`, Math.abs(metrics[a].h - metrics[b].h) <= 1, JSON.stringify([metrics[a], metrics[b]]));
+sameH(0, 1, "h1");
+sameH(2, 3, "h2");
+sameH(4, 5, "h3");
+sameH(6, 7, "paragraph");
+for (const [i, name] of [[2, "h2"], [4, "h3"], [6, "paragraph"]]) {
+  const m = metrics[i];
+  check(`${name}: the chip's title sits on the text's baseline`, m.textBase !== null && Math.abs(m.chipBase - m.textBase) <= 1, JSON.stringify(m));
+}
+check("the chip scales with the heading", metrics[0].font > 28 && metrics[2].font > 20 && metrics[6].font < 15, JSON.stringify(metrics.map((m) => m.font)));
+check("a heading's outline text is the session title", await view(() => document.querySelector(".mde").mdeView.scrollToHeading("refactor-the-sync-engine")));
+await page.screenshot({ path: `${SHOTS}/7-headings.png`, clip: { x: 0, y: 0, width: 1100, height: 640 } });
+await headMock(true);
+await sleep(500);
+const hb = await view(() => [...document.querySelectorAll('.mde .ln-heading .wchip[data-id="ses_named"] .wt')].map((t) => getComputedStyle(t).animationName + "/" + getComputedStyle(t).backgroundClip));
+check("the shimmer runs at heading size", hb.length === 2 && hb.every((x) => x === "mde-shimmer/text"), JSON.stringify(hb));
+await page.screenshot({ path: `${SHOTS}/8-headings-busy.png`, clip: { x: 0, y: 0, width: 1100, height: 640 } });
+await page.locator(".mde .ln.h1 .wchip").first().screenshot({ path: `${SHOTS}/8-h1-busy-chip.png` });
+await page.emulateMedia({ reducedMotion: "reduce" });
+const hr = await view(() => getComputedStyle(document.querySelector('.mde .ln-heading .wchip[data-id="ses_named"] .wt')).animationName);
+check("reduced motion at heading size: no animation", hr === "none", hr);
+await page.screenshot({ path: `${SHOTS}/9-headings-reduced-motion.png`, clip: { x: 0, y: 0, width: 1100, height: 640 } });
+await page.emulateMedia({ reducedMotion: "no-preference" });
+// caret and delete in a heading
+const ht = await text();
+const hFrom = ht.indexOf('<session id="ses_named" />', ht.indexOf("## Work"));
+const hTo = hFrom + '<session id="ses_named" />'.length;
+await page.click(".mde .ln >> nth=3");
+await view(([f]) => document.querySelector(".mde").mdeView.setSel({ anchor: f, head: f }), [hFrom]);
+await page.keyboard.press("ArrowRight");
+s = await sel();
+check("heading: ArrowRight jumps over the chip", s.head === hTo, JSON.stringify(s));
+const hbox = await page.locator(".mde .ln.h2 .wchip").first().boundingBox();
+await page.mouse.click(hbox.x + 6, hbox.y + hbox.height / 2);
+s = await sel();
+check("heading: a click on the chip's left half puts the caret before it", s.head === hFrom, JSON.stringify(s));
+await view(([t]) => document.querySelector(".mde").mdeView.setSel({ anchor: t, head: t }), [hTo]);
+await page.keyboard.press("Backspace");
+check("heading: Backspace removes the whole tag", (await text()) === ht.slice(0, hFrom) + ht.slice(hTo));
+await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
+check("heading: undo", (await text()) === ht);
+await view(() => window.grimWidgets.setSessionSource(null));
+
 // read-only (a guest page or history preview uses the same renderer): a fresh page, the chip is there
 const ro = await ctx.newPage();
 await ro.goto(`${BASE}/app/${ws.id}/Widgets.md`);

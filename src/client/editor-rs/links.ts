@@ -4,6 +4,7 @@
 
 import { cleanSrc } from "./images.ts";
 import type { RLine } from "./lineview.ts";
+import { widgetLabel, type WidgetMatch } from "./widgets.ts";
 import { ARTIFACTS_DIR } from "../../shared/artifacts.ts";
 
 export type LinkTarget =
@@ -171,9 +172,22 @@ export function lineLinks(line: RLine, text: string): LineLink[] {
   return out;
 }
 
-/** A heading line's visible text (its text segments, without markers or the link chips). */
-export function visibleText(line: RLine, text: string): string {
+/**
+ * A heading line's visible text (its text segments, without markers or the link chips); its widgets (`widgets`, from
+ * lineWidgets) as what they show.
+ */
+export function visibleText(line: RLine, text: string, widgets: WidgetMatch[] = []): string {
   let s = "";
-  for (const seg of line.segs) if (seg.kind === "text") s += text.slice(seg.from, seg.to);
+  for (const seg of line.segs) {
+    if (seg.kind !== "text") continue;
+    let at = seg.from;
+    for (const w of widgets) {
+      if (w.to <= at || w.from >= seg.to) continue;
+      s += text.slice(at, Math.max(at, w.from));
+      if (w.from >= seg.from) s += widgetLabel(w);
+      at = Math.min(w.to, seg.to);
+    }
+    s += text.slice(at, seg.to);
+  }
   return s;
 }
