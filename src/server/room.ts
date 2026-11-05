@@ -14,7 +14,8 @@ import { attribute, LineMemory } from "../shared/lineauthors.ts";
 import { linePairs } from "../shared/textdiff.ts";
 import type { RoomStorage } from "./seams/room-storage.ts";
 import type { Db } from "./seams/db.ts";
-import { baseIndex, blameMessage, gitIdentity, isBaseLine, originLines, originOf, rebase, resolveAuthors, UNKNOWN, type BlameMessage, type LineAuthor, type NoteOrigin, type OriginAuthors } from "./blame.ts";
+import { baseIndex, blameMessage, findBlock, gitIdentity, isBaseLine, MAX_ASSIGN_LINES, originLines, originOf, rebase, resolveAuthors, restoreAssignments, saveAssignments, UNKNOWN, type BlameMessage, type LineAuthor, type NoteOrigin, type OriginAuthors, type SavedAssignments, sessionAgent } from "./blame.ts";
+import type { SetAuthorsMsg } from "../shared/wsmux.ts";
 
 export const MSG_SYNC = 0;
 export const MSG_AWARENESS = 1;
@@ -99,7 +100,14 @@ export const BLAME_MS = 1000;
 interface Person extends LineAuthor {
   email: string;
   gitName: string;
+  /**
+   * Given lines by a person's setAuthors (an agent session, or the sender themselves), not by editing: its lines
+   * are also kept outside the crash log (`assignKey`), since Git doesn't know them.
+   */
+  assigned?: boolean;
 }
+
+const SESSION_ID_RE = /^[\w.:-]{1,128}$/;
 /** How many awareness client ids one websocket may own (a client may switch docs once on a generation change). */
 const MAX_IDS_PER_CONN = 2;
 /** Updates are buffered this long per room: one merged crash-log row and one line-author pass per burst. */
@@ -302,6 +310,8 @@ export class Room {
     this.baseSnapshot = content === null ? Y.emptySnapshot : Y.snapshot(this.doc);
     this.liveText = this.baseContent;
     this.lineValues = originLines(this.baseContent);
+    if (content !== null) this.restoreAssigned();
+    else if (!this.ephemeral) this.storage.putBlob(this.assignKey(), new TextEncoder().encode("null"));
     this.originCommit = content === null ? null : head;
     // a new note (or one made again after it was deleted): who made it before doesn't count
     if (content === null && !this.ephemeral) this.storage.putBlob(this.originKey(), new TextEncoder().encode("{}"));
@@ -405,7 +415,7 @@ export class Room {
   /** The index of `p` in `people` (added, and persisted for the crash log, the first time); unknown for the system. */
   private personIndex(p: Participant | undefined): number {
     if (!p || p === SYSTEM) return UNKNOWN;
-    let i = this.people.findIndex((q) => q.id === p.id);
+    let i = this.people.findIndex((q) => q.id === p.id && !q.assigned);
     if (i < 0) {
       const session = p.session ? { session: p.session, ...(p.sessionName ? { sessionName: p.sessionName } : {}), sessionColor: p.sessionColor } : {};
       i = this.people.push({ id: p.id, name: p.name, kind: p.kind, color: p.color, ...session, email: p.email, gitName: authorOf(p).name }) - 1;
@@ -637,6 +647,116 @@ export class Room {
       this.storage.exec("INSERT INTO room_updates (room, seq, data) VALUES (?, ?, ?)", this.key, 0, Y.encodeStateAsUpdate(this.doc));
     });
     this.nextSeq = 1;
+    this.saveAssigned();
+  }
+
+  /** Where assigned lines are kept for when the crash log is gone (it's dropped when an idle room closes). */
+  private assignKey() {
+    return `assigned\u0000${this.key}`;
+  }
+
+  private savedAssigned: string | null = null;
+
+  /** Keep the assigned lines of the live text (or nothing, when there are none) next to the room's blame cache. */
+  private saveAssigned() {
+    if (this.ephemeral) return;
+    const saved = saveAssignments(this.liveText, this.lineValues, this.people, (p) => !!p.assigned);
+    const json = JSON.stringify(saved);
+    if (json === this.savedAssigned) return;
+    this.savedAssigned = json;
+    this.storage.putBlob(this.assignKey(), new TextEncoder().encode(json));
+  }
+
+  /** A room opened from Git: lines assigned before that are still lines of the text get their author back. */
+  private restoreAssigned() {
+    if (this.ephemeral) return;
+    let saved: SavedAssignments<Person> | null = null;
+    try {
+      const bytes = this.storage.getBlob(this.assignKey());
+      saved = bytes ? (JSON.parse(new TextDecoder().decode(bytes)) as SavedAssignments<Person> | null) : null;
+    } catch {
+      saved = null;
+    }
+    if (!saved || typeof saved.text !== "string" || !Array.isArray(saved.lines) || !Array.isArray(saved.people)) return;
+    this.lineValues = restoreAssignments(saved, this.liveText, this.lineValues, (p) => this.assignedIndex(p));
+  }
+
+  /** The index of an assigned person like `p` in `people` (added the first time). */
+  private assignedIndex(p: Person): number {
+    const i = this.people.findIndex((q) => q.assigned && q.id === p.id);
+    if (i >= 0) {
+      if (p.sessionName && this.people[i]!.sessionName !== p.sessionName) this.people[i] = { ...this.people[i]!, sessionName: p.sessionName };
+      return i;
+    }
+    return this.people.push({ ...p, assigned: true }) - 1;
+  }
+
+  /**
+   * The author an agent session gets when someone assigns it lines: the room's participant or Git author with that
+   * session if there is one (so its lines read as one author), else an agent named "Agent" with the session.
+   */
+  private sessionPerson(session: string, name: string | undefined): Person {
+    const named = (p: Person): Person => (name ? { ...p, sessionName: name } : p);
+    const live = this.people.find((p) => p.session === session && !p.assigned);
+    if (live) {
+      const { assigned: _, ...p } = live;
+      return named(p);
+    }
+    const git = this.originAuthors?.authors.find((a) => a.session === session);
+    if (git) {
+      const [gitName = "Agent", email = "agent@agents.grimoire"] = git.git.split("\0");
+      return named({ id: git.id, name: git.name, kind: git.kind, color: git.color, session, ...(git.sessionName ? { sessionName: git.sessionName } : {}), sessionColor: git.sessionColor ?? sessionAgent(session).sessionColor, email, gitName });
+    }
+    return { ...sessionAgent(session, name), email: "agent@agents.grimoire", gitName: "Agent" };
+  }
+
+  /**
+   * A person (not a read-only connection) makes a block of lines an agent session's, or their own (`session:
+   * null`): `lines` are the block's lines as the client has them, starting at its line `from`; the block is found in
+   * the live text (at `from`, else the nearest place it is, if others moved it). The lines' authors change and
+   * nothing else: no commit (Git blame doesn't have them; they're kept in the room: the crash log, and the assigned
+   * lines next to it for when it's dropped). Later edits move them like any author: a line someone changes becomes
+   * theirs, undoing that gives it back (LineMemory). Everyone gets the new blame at once; the sender gets
+   * `{t:"setAuthors", ok, from?, count?}`.
+   */
+  setAuthors(conn: Conn, msg: SetAuthorsMsg): boolean {
+    const reply = (ok: boolean, extra: object = {}) => this.sendControlTo(conn, { t: "setAuthors", ok, ...extra });
+    const s = msg.session;
+    const valid =
+      !conn.readOnly &&
+      Number.isInteger(msg.from) &&
+      msg.from >= 0 &&
+      Array.isArray(msg.lines) &&
+      msg.lines.length > 0 &&
+      msg.lines.length <= MAX_ASSIGN_LINES &&
+      msg.lines.every((l) => typeof l === "string") &&
+      (s === null || (typeof s === "object" && typeof s.id === "string" && SESSION_ID_RE.test(s.id) && (s.name === undefined || typeof s.name === "string")));
+    if (!valid || this.closed) {
+      reply(false, { reason: conn.readOnly ? "read-only" : "invalid" });
+      return false;
+    }
+    this.flushPending();
+    const from = findBlock(this.liveText.split("\n"), msg.from, msg.lines);
+    if (from === null) {
+      reply(false, { reason: "changed" });
+      return false;
+    }
+    let person: Person;
+    if (s) person = this.sessionPerson(s.id, s.name?.trim().slice(0, 200) || undefined);
+    else {
+      const me = this.personIndex(conn.user);
+      if (me < 0) {
+        reply(false, { reason: "invalid" });
+        return false;
+      }
+      person = this.people[me]!;
+    }
+    const v = this.assignedIndex(person);
+    for (let i = from; i < from + msg.lines.length; i++) this.lineValues[i] = v;
+    this.saveMeta();
+    this.scheduleBlame(0);
+    reply(true, { from, count: msg.lines.length });
+    return true;
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -1056,6 +1176,7 @@ export class Room {
     } else if (type === MSG_CONTROL) {
       const msg = JSON.parse(decoding.readVarString(dec)) as { t: string };
       if (msg.t === "flush" && !conn.readOnly) void this.flush().catch((e) => console.error(`[room ${this.key}] flush:`, e));
+      else if (msg.t === "setAuthors") this.setAuthors(conn, msg as SetAuthorsMsg);
     }
   }
 

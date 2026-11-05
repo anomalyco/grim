@@ -247,8 +247,28 @@ export interface FlushMsg {
   t: "flush";
 }
 
-export type ServerNoteMsg = HelloMsg | StatusMsg | ExternalMsg | BlameMsg | ClosedMsg | EndMsg | RenewMsg;
-export type ClientNoteMsg = FlushMsg;
+/**
+ * → Make a block of lines an agent session's (`session`), or the sender's own (`session: null`): `lines` are the
+ * block's lines as the client has them, from its line `from`. Not on read-only connections.
+ */
+export interface SetAuthorsMsg {
+  t: "setAuthors";
+  from: number;
+  lines: string[];
+  session: { id: string; name?: string } | null;
+}
+
+/** ← The answer to a setAuthors, to its sender only: where the block was found, or why not (the blame follows). */
+export interface SetAuthorsResultMsg {
+  t: "setAuthors";
+  ok: boolean;
+  from?: number;
+  count?: number;
+  reason?: "read-only" | "invalid" | "changed";
+}
+
+export type ServerNoteMsg = HelloMsg | StatusMsg | ExternalMsg | BlameMsg | ClosedMsg | EndMsg | RenewMsg | SetAuthorsResultMsg;
+export type ClientNoteMsg = FlushMsg | SetAuthorsMsg;
 
 // ---- varuint (lib0's encoding: 7 bits per byte, low bits first, 0x80 = more) ----
 

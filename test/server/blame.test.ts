@@ -15,7 +15,7 @@ const { LocalGitStore } = await import("../../src/server/store/localgit.ts");
 const { MemoryStore } = await import("../../src/server/store/memory.ts");
 const { blameFromVersions } = await import("../../src/server/store/blame.ts");
 const { RoomManager, MSG_CONTROL, MSG_SYNC, BLAME_MS, authorOf, TEXT_NAME } = await import("../../src/server/rooms.ts");
-const { attribute, rebase, originLines, UNKNOWN, baseLine } = await import("../../src/server/blame.ts");
+const { attribute, rebase, originLines, UNKNOWN, baseLine, findBlock, saveAssignments, restoreAssignments } = await import("../../src/server/blame.ts");
 const { guestParticipant, GUEST_EMAIL } = await import("../../src/server/anon.ts");
 const { db } = await import("../../src/server/db.ts");
 const { bunDb } = await import("../../src/server/bun/db-bun.ts");
@@ -243,6 +243,28 @@ const lineEndOf = (t: Y.Text, n: number) => {
   return e < 0 ? s.length : e;
 };
 
+describe("assigned lines (setAuthors)", () => {
+  test("findBlock: at `from`, else the nearest occurrence, else null", () => {
+    const live = ["a", "x", "b", "x", "c"];
+    expect(findBlock(live, 1, ["x"])).toBe(1);
+    expect(findBlock(live, 2, ["x", "c"])).toBe(3);
+    expect(findBlock(live, 4, ["x"])).toBe(3);
+    expect(findBlock(live, 0, ["b", "x"])).toBe(2);
+    expect(findBlock(live, 0, ["y"])).toBeNull();
+    expect(findBlock(live, 3, ["x", "c", "d"])).toBeNull();
+  });
+
+  test("saved by line text and put back through a line diff", () => {
+    const people = [{ id: "me", assigned: false }, { id: "ses", assigned: true }];
+    const saved = saveAssignments("a\nb\nc\nd", [0, 1, 1, -3], people, (p) => p.assigned)!;
+    expect(saved).toEqual({ text: "a\nb\nc\nd", people: [people[1]], lines: [[1, 0], [2, 0]] });
+    expect(saveAssignments("a", [0], people, (p) => p.assigned)).toBeNull();
+    // a line added at the top, "c" changed: only "b" is still the session's
+    const values = restoreAssignments(saved, "new\na\nb\nC\nd", originLines("new\na\nb\nC\nd"), () => 7);
+    expect(values).toEqual([baseLine(0), baseLine(1), 7, baseLine(3), baseLine(4)]);
+  });
+});
+
 describe("rooms: live line authors", () => {
   const store = new LocalGitStore(join(dir, "git2"));
 
@@ -431,6 +453,72 @@ describe("rooms: live line authors", () => {
     room.agentEdit(guestParticipant("zzzzzz1", "busy-bee", null)!, (t) => t.insert(0, "hi\n"));
     expect(names(room.blame())).toEqual(["busy-bee", "Grim", ""]);
     room.destroy(true);
+  });
+
+  /** A setAuthors control message from `conn`, as the socket delivers it. */
+  function setAuthors(room: { onMessage(c: never, d: Uint8Array): void }, conn: Conn, msg: object) {
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, MSG_CONTROL);
+    encoding.writeVarString(enc, JSON.stringify({ t: "setAuthors", ...msg }));
+    room.onMessage(conn as never, encoding.toUint8Array(enc));
+  }
+  const sessions = (b: Blame) => b.lines.map((i) => (i < 0 ? "" : ((b.authors[i] as { sessionName?: string }).sessionName ?? b.authors[i]!.name)));
+
+  test("setAuthors: a block becomes a session's (or the sender's); edits, undo, a commit, a restart and an idle close keep it", async () => {
+    await seedRepo("assign1", "one\ntwo\nthree\nfour\n");
+    const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
+    const room = await rooms.get("assign1", "n.md", "main");
+    await Bun.sleep(100);
+    const a = fakeConn(alice);
+    const b = fakeConn(bob);
+    room.addConn(a as never);
+    room.addConn(b as never);
+    const ca = client(room, a);
+    setAuthors(room, a, { from: 1, lines: ["two", "three"], session: { id: "ses_abc", name: "Fix the login bug" } });
+    expect(controls(a).at(-1)).toEqual({ t: "setAuthors", ok: true, from: 1, count: 2 });
+    const msg = room.blame();
+    expect(sessions(msg)).toEqual(["Dave", "Fix the login bug", "Fix the login bug", "Dave", ""]);
+    expect(msg.authors[msg.lines[1]!]).toMatchObject({ kind: "agent", session: "ses_abc", sessionName: "Fix the login bug" });
+    // everyone gets it at once
+    await Bun.sleep(50);
+    expect(sessions(blames(b).at(-1)!)).toEqual(["Dave", "Fix the login bug", "Fix the login bug", "Dave", ""]);
+    // Alice edits one of the lines: only it is hers; undo gives it back to the session
+    ca.edit((t) => t.insert(lineEndOf(t, 2), "!"));
+    expect(sessions(room.blame())).toEqual(["Dave", "Fix the login bug", "Alice", "Dave", ""]);
+    ca.edit((t) => t.delete(lineEndOf(t, 2) - 1, 1));
+    expect(sessions(room.blame())).toEqual(["Dave", "Fix the login bug", "Fix the login bug", "Dave", ""]);
+    // a line added above moves the block; a stale `from` still finds it
+    ca.edit((t) => t.insert(0, "top\n"));
+    setAuthors(room, a, { from: 0, lines: ["four"], session: null });
+    expect(controls(a).at(-1)).toEqual({ t: "setAuthors", ok: true, from: 4, count: 1 });
+    expect(sessions(room.blame())).toEqual(["Alice", "Dave", "Fix the login bug", "Fix the login bug", "Alice", ""]);
+    // text that isn't there, a bad session id, a read-only connection: refused, nothing changes
+    setAuthors(room, a, { from: 0, lines: ["nope"], session: { id: "ses_x" } });
+    expect(controls(a).at(-1)).toMatchObject({ ok: false, reason: "changed" });
+    setAuthors(room, a, { from: 0, lines: ["top"], session: { id: "bad id!" } });
+    expect(controls(a).at(-1)).toMatchObject({ ok: false, reason: "invalid" });
+    const ro = fakeConn(bob, true);
+    room.addConn(ro as never);
+    setAuthors(room, ro, { from: 0, lines: ["top"], session: { id: "ses_x" } });
+    expect(controls(ro).at(-1)).toMatchObject({ ok: false, reason: "read-only" });
+    const want = ["Alice", "Dave", "Fix the login bug", "Fix the login bug", "Alice", ""];
+    expect(sessions(room.blame())).toEqual(want);
+    // no commit for an author change alone
+    const head = await store.head("assign1", "main");
+    room.removeConn(ro as never);
+    // a crash: the crash log keeps it
+    room.destroy(false);
+    const again = await new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() }).get("assign1", "n.md", "main");
+    await Bun.sleep(150);
+    expect(sessions(again.blame())).toEqual(want);
+    // saved and closed (the crash log goes): the assigned lines come back from what's kept next to it
+    await again.flush();
+    expect(await store.head("assign1", "main")).not.toBe(head);
+    again.destroy(true);
+    const third = await new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() }).get("assign1", "n.md", "main");
+    await Bun.sleep(150);
+    expect(sessions(third.blame())).toEqual(want);
+    third.destroy(true);
   });
 });
 

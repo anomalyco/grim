@@ -169,3 +169,69 @@ export function blameMessage(values: number[], people: LineAuthor[], origin: (i:
   const lines = values.map((v) => (v >= 0 ? ref(people[v]) : isBaseLine(v) ? ref(origin(baseIndex(v))) : UNKNOWN));
   return { t: "blame", authors, lines, ...(noteOrigin ? { origin: noteOrigin } : {}) };
 }
+
+/** The author of an agent session known by nothing but its id (and title): an agent named "Agent", as Git blame shows one. */
+export function sessionAgent(session: string, sessionName?: string): LineAuthor {
+  return gitAuthor({ name: "Agent", email: "agent@agents.grimoire", session, ...(sessionName ? { sessionName } : {}) });
+}
+
+/** The most lines one setAuthors message may assign. */
+export const MAX_ASSIGN_LINES = 20_000;
+
+/**
+ * Where a client's line block is in the live text: `expected` (the block's lines, as the client saw them) at
+ * `from` if they're there, else the occurrence nearest to it (someone added or removed lines above meanwhile).
+ * Null if the live text doesn't have the block (it changed under the client).
+ */
+export function findBlock(live: string[], from: number, expected: string[]): number | null {
+  const at = (i: number) => i >= 0 && i + expected.length <= live.length && expected.every((t, k) => live[i + k] === t);
+  if (at(from)) return from;
+  for (let d = 1; d <= live.length; d++) {
+    if (at(from - d)) return from - d;
+    if (at(from + d)) return from + d;
+    if (from - d < 0 && from + d >= live.length) break;
+  }
+  return null;
+}
+
+/**
+ * Lines assigned an author outside Git (setAuthors), kept across the room's crash log being dropped (an idle
+ * room closes): the text they were assigned in, `lines` = [line index in it, index into `people`].
+ */
+export interface SavedAssignments<P> {
+  text: string;
+  people: P[];
+  lines: Array<[number, number]>;
+}
+
+/**
+ * The assignments of `values` (lines of `text` whose value `isAssigned`), to save; null if there are none.
+ */
+export function saveAssignments<P>(text: string, values: number[], people: P[], isAssigned: (p: P) => boolean): SavedAssignments<P> | null {
+  const out: P[] = [];
+  const index = new Map<number, number>();
+  const lines: Array<[number, number]> = [];
+  values.forEach((v, i) => {
+    const p = v >= 0 ? people[v] : undefined;
+    if (!p || !isAssigned(p)) return;
+    let k = index.get(v);
+    if (k === undefined) index.set(v, (k = out.push(p) - 1));
+    lines.push([i, k]);
+  });
+  return lines.length ? { text, people: out, lines } : null;
+}
+
+/**
+ * Put saved assignments back on `values` (lines of `text`): every assigned line that's still a line of `text`
+ * (line diff from the saved text) gets its author again (`person` turns a saved person into a value).
+ */
+export function restoreAssignments<P>(saved: SavedAssignments<P>, text: string, values: number[], person: (p: P) => number): number[] {
+  const assigned = new Map(saved.lines.map(([i, k]) => [i, k]));
+  const out = values.slice();
+  for (const [a, b] of linePairs(saved.text.split("\n"), text.split("\n"))) {
+    const k = assigned.get(a);
+    const p = k === undefined ? undefined : saved.people[k];
+    if (p !== undefined) out[b] = person(p);
+  }
+  return out;
+}
