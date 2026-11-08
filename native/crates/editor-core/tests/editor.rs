@@ -442,6 +442,16 @@ fn copy_gives_raw_markdown_and_select_all_delete() {
     let mut e = Editor::new("- a **b**");
     e.set_selection(Sel::new(0, 9));
     assert_eq!(e.copy().as_deref(), Some("- a **b**"));
+    // from a heading's text start onto the next line: with its `### `; within the line: the text only
+    let mut e = Editor::new("### Groceries:\n- [ ] milk");
+    e.set_selection(Sel::new(4, 25));
+    assert_eq!(e.copy().as_deref(), Some("### Groceries:\n- [ ] milk"));
+    e.set_selection(Sel::new(4, 14));
+    assert_eq!(e.copy().as_deref(), Some("Groceries:"));
+    // a table from its first cell's text: with the row's leading `| `
+    let mut e = Editor::new("| Name | Qty |\n| --- | --- |");
+    e.set_selection(Sel::new(2, 28));
+    assert_eq!(e.copy().as_deref(), Some("| Name | Qty |\n| --- | --- |"));
     let mut e = Editor::new("# a\n- b\nc **d**");
     k(&mut e, Key::Char('a'), Mods::CMD);
     assert_eq!(sel(&e), (0, 15));

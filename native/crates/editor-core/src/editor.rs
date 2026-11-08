@@ -10,7 +10,7 @@ use crate::keymap::{Command, Key, Mods, resolve};
 use crate::macos_keys::KeyTable;
 use crate::layout::Layout;
 use crate::navigation::{self as nav, HUnit};
-use crate::parser::{BlockState, BlockType, Doc, InlineType, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse_until};
+use crate::parser::{BlockState, BlockType, Doc, InlineType, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse_until, trim_range};
 use crate::render::{LineView, line_view};
 use crate::reveal::{RevealMap, compute_reveal};
 use crate::rules::{self, Change, Edit, EditKind, FormatType, map_pos};
@@ -836,9 +836,9 @@ impl<S: TextStore> Editor<S> {
 
     /// Cut: returns the raw selected text (put it on the clipboard) and deletes it.
     pub fn cut(&mut self) -> Option<String> {
-        let t = self.selected_text()?.to_string();
+        let t = self.copy()?;
         if !self.read_only {
-            let e = rules::replace_selection(&self.doc, self.sel, "", EditKind::Paste);
+            let e = rules::replace_selection(&self.doc, self.clipboard_sel(), "", EditKind::Paste);
             self.apply_edit(Some(e));
         }
         Some(t)
@@ -846,7 +846,20 @@ impl<S: TextStore> Editor<S> {
 
     /// Copy: the raw selected text.
     pub fn copy(&self) -> Option<String> {
-        self.selected_text().map(str::to_string)
+        let s = self.clipboard_sel();
+        (!s.is_empty()).then(|| self.doc.text[s.from()..s.to()].to_string())
+    }
+
+    /// The selection copy / cut take: one from a line's text start past its end also takes the line's
+    /// hidden prefix (a heading's `### `, a todo's `- [ ] `, a table row's `| `), so the lines paste back
+    /// as they were.
+    fn clipboard_sel(&self) -> Sel {
+        let line = self.doc.line_of(self.sel.from());
+        let text_from = match line.table.as_ref().and_then(|t| t.cells.first()) {
+            Some(&(cf, ct)) => trim_range(&self.doc.text, cf, ct).0,
+            None => line.text_from,
+        };
+        if self.sel.from() == text_from && self.sel.to() > line.to { Sel::new(line.from, self.sel.to()) } else { self.sel }
     }
 
     /// Replace a range (spelling correction, `insertReplacementText`).

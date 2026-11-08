@@ -178,9 +178,9 @@ fn deleting_a_selection_across_a_fold_deletes_the_hidden_text() {
     let mut e = Editor::new(DOC);
     e.toggle_fold(0);
     e.set_selection(Sel::new(2, 15));
-    assert_eq!(e.copy().as_deref(), Some("A\na1\n## B\nb1\n"));
-    assert_eq!(e.cut().as_deref(), Some("A\na1\n## B\nb1\n"));
-    assert_eq!(e.text(), "# # C\nc1");
+    assert_eq!(e.copy().as_deref(), Some("# A\na1\n## B\nb1\n"));
+    assert_eq!(e.cut().as_deref(), Some("# A\na1\n## B\nb1\n"));
+    assert_eq!(e.text(), "# C\nc1");
     // select all keeps the last section folded
     let mut e = Editor::new(DOC);
     e.toggle_fold(4);
