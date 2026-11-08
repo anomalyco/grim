@@ -10,7 +10,7 @@ use crate::keymap::{Command, Key, Mods, resolve};
 use crate::macos_keys::KeyTable;
 use crate::layout::Layout;
 use crate::navigation::{self as nav, HUnit};
-use crate::parser::{BlockState, BlockType, Doc, InlineType, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse_until};
+use crate::parser::{BlockState, BlockType, Doc, InlineType, Line, Reparsed, line_at, literal_line, parse_blocks_with_states, reparse_until, trim_range};
 use crate::render::{LineView, line_view};
 use crate::reveal::{RevealMap, compute_reveal};
 use crate::rules::{self, Change, Edit, EditKind, FormatType, map_pos};
@@ -851,10 +851,15 @@ impl<S: TextStore> Editor<S> {
     }
 
     /// The selection copy / cut take: one from a line's text start past its end also takes the line's
-    /// hidden prefix (a heading's `### `, a todo's `- [ ] `), so the lines paste back as they were.
+    /// hidden prefix (a heading's `### `, a todo's `- [ ] `, a table row's `| `), so the lines paste back
+    /// as they were.
     fn clipboard_sel(&self) -> Sel {
         let line = self.doc.line_of(self.sel.from());
-        if self.sel.from() == line.text_from && self.sel.to() > line.to { Sel::new(line.from, self.sel.to()) } else { self.sel }
+        let text_from = match line.table.as_ref().and_then(|t| t.cells.first()) {
+            Some(&(cf, ct)) => trim_range(&self.doc.text, cf, ct).0,
+            None => line.text_from,
+        };
+        if self.sel.from() == text_from && self.sel.to() > line.to { Sel::new(line.from, self.sel.to()) } else { self.sel }
     }
 
     /// Replace a range (spelling correction, `insertReplacementText`).
