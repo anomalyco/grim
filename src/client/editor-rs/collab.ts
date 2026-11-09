@@ -11,6 +11,7 @@
 import { Emitter } from "../emitter.ts";
 import { crashSafe, guardEngine, isEngineCrash } from "./guard.ts";
 import type { UnsentEdits } from "./recover.ts";
+import type { KeptEdits } from "./unsent.ts";
 import type { CollabEngine, Patch, Received } from "./types.ts";
 import { CODE, type WelcomeMsg, type WorkspaceChannel } from "../../shared/wsmux.ts";
 import type { ChannelHandlers } from "../wsclient.ts";
@@ -39,7 +40,8 @@ export type CollabEvents = {
   synced: [];
   saveState: [SaveState];
   closed: [ClosedReason, string | undefined];
-  reset: [];
+  /** The room's epoch changed (rebuilt on the server): our session's edits not on the server (`kept`), to merge by text after reopening. */
+  reset: [kept: KeptEdits | null];
   external: [string | null];
   readOnly: [boolean];
   awareness: [];
@@ -109,7 +111,15 @@ export interface RustCollabOptions {
   workspace?: WorkspaceLike;
   /** v2: open as a prefetch (no awareness, not in presence) until `setHidden(false)`. */
   hidden?: boolean;
+  /**
+   * Keep our edits the server hasn't acked yet (a reload or a crash then merges them: recover.ts), or drop them
+   * (null) once everything we sent is durable on the server (its `ack`).
+   */
+  persist?: (kept: KeptEdits | null) => void;
 }
+
+/** Edits not acked after this long are kept locally. */
+const PERSIST_MS = 400;
 
 const OPEN = 1;
 const MSG_AWARENESS = 1;
@@ -160,6 +170,15 @@ export class RustCollab extends Emitter<CollabEvents> {
   private awShown = false;
   /** The state vector of the engine's last sync step 1 (sent on every hello): what a re-open asks the server from. */
   private lastSv: Uint8Array | null = null;
+  /** Sync frames with changes sent on this connection, and how many the server acked as durable (`ack`). */
+  private sent = 0;
+  private acked = 0;
+  /** The text when everything we had sent was acked: the server had it (the merge base for kept edits). */
+  private ackedText: string | null = null;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Something is kept locally for this note (by us). */
+  private kept = false;
+  private persist: ((kept: KeptEdits | null) => void) | null;
 
   constructor(
     factory: CollabFactory,
@@ -181,6 +200,7 @@ export class RustCollab extends Emitter<CollabEvents> {
     this.recover = opts.recover ?? null;
     this.workspace = opts.workspace ?? null;
     this.hidden = !!opts.hidden;
+    this.persist = opts.persist ?? null;
     window.addEventListener("online", this.onOnline);
     this.connect();
   }
@@ -241,6 +261,7 @@ export class RustCollab extends Emitter<CollabEvents> {
     if (this.stopped) return;
     const o = this.engine.take_outgoing(performance.now());
     this.send(o.frames);
+    if (this.persist && this.synced && !this.persistTimer) this.persistTimer = setTimeout(() => ((this.persistTimer = null), this.checkUnsent()), PERSIST_MS);
     if (o.awareness) this.presenceChanged();
     if (o.wakeInMs !== undefined && o.wakeInMs !== null) this.wake(o.wakeInMs);
   }
@@ -252,8 +273,50 @@ export class RustCollab extends Emitter<CollabEvents> {
     this.pump();
   }
 
+  /**
+   * Keep or drop our unacked edits now (a timer does it 400 ms after edits; the page going away calls it at once).
+   * Kept: the text differs from what the server last acked and something is unacked (or we're not connected).
+   */
+  checkUnsent(): void {
+    if (!this.persist || !this.synced || this.stopped || this.crashed) return;
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+    this.persistTimer = null;
+    let kept: KeptEdits | null = null;
+    try {
+      const text = this.engine.text();
+      const base = this.ackedText ?? this.baseText ?? "";
+      const pending = this.status !== "connected" || this.sent > this.acked;
+      if (pending && text !== base) kept = { generation: this.generation, base, text, update: this.factory.recover?.(this.id) ?? new Uint8Array() };
+    } catch (err) {
+      if (isEngineCrash(err)) return;
+      throw err;
+    }
+    if (!kept && !this.kept) return;
+    this.kept = !!kept;
+    this.persist(kept);
+  }
+
+  /** Where unacked edits are kept (a prefetched note gets it when it's opened). */
+  setPersist(fn: (kept: KeptEdits | null) => void): void {
+    this.persist = fn;
+  }
+
+  /** What our session changed that may not be on the server, for a merge by text (a reset). */
+  private unsentEdits(): KeptEdits | null {
+    try {
+      const text = this.engine.text();
+      const base = this.ackedText ?? this.baseText;
+      if (base === null || text === base || this.engine.read_only()) return null;
+      return { generation: this.generation, base, text, update: this.factory.recover?.(this.id) ?? new Uint8Array() };
+    } catch {
+      return null;
+    }
+  }
+
   destroy(): void {
     if (this.destroyed) return;
+    // (a note switch: what isn't acked is kept for the next open)
+    if (!this.stopped) this.checkUnsent();
     this.destroyed = true;
     // tell the others we left while the socket is still open
     if (!this.stopped) {
@@ -470,12 +533,15 @@ export class RustCollab extends Emitter<CollabEvents> {
         case "external":
           this.emit("external", n.commit);
           break;
-        case "reset":
-          // the room was recreated, or read-only would drop our offline edits: the app starts over
+        case "reset": {
+          // the room's epoch changed (its document was rebuilt from the text), or read-only would drop our offline
+          // edits: the app starts over, and merges what we wrote that the server may not have (by text)
+          const kept = this.unsentEdits();
           this.stop();
           this.closeSocket();
-          this.emit("reset");
+          this.emit("reset", kept);
           return;
+        }
       }
     }
     // the hello's re-announce, the cursor after remote edits, and the wake-up timer
@@ -515,7 +581,20 @@ export class RustCollab extends Emitter<CollabEvents> {
         if (b < 0x80 || i >= frame.length) break;
       }
       const msg = JSON.parse(new TextDecoder().decode(frame.subarray(i, i + len))) as { t?: unknown; generation?: unknown; authors?: unknown; lines?: unknown };
-      if (msg.t === "hello" && typeof msg.generation === "string") this.generation = msg.generation;
+      if (msg.t === "hello" && typeof msg.generation === "string") {
+        // a new connection: its frames are counted afresh (the server's count is per connection)
+        if (this.generation === msg.generation || this.generation === null) this.generation = msg.generation;
+        this.sent = this.acked = 0;
+      }
+      if (msg.t === "ack" && typeof (msg as { n?: unknown }).n === "number") {
+        this.acked = (msg as { n: number }).n;
+        if (this.acked >= this.sent && this.synced) {
+          try {
+            this.ackedText = this.engine.text();
+          } catch {}
+          if (this.kept) this.checkUnsent();
+        }
+      }
       if (msg.t === "blame") {
         const blame = parseBlame(msg);
         if (blame) {
@@ -576,6 +655,7 @@ export class RustCollab extends Emitter<CollabEvents> {
       }
       ch.send(f);
     }
+    this.countSent(frames);
   }
 
   private send(frames: Uint8Array[]): void {
@@ -588,6 +668,12 @@ export class RustCollab extends Emitter<CollabEvents> {
       return;
     }
     for (const f of frames) ws.send(f);
+    this.countSent(frames);
+  }
+
+  /** Sync frames carrying changes (step 2, update): the server acks each once it's durable. */
+  private countSent(frames: Uint8Array[]): void {
+    for (const f of frames) if (f[0] === 0 && f[1] !== 0) this.sent++;
   }
 }
 

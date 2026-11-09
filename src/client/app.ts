@@ -7,7 +7,7 @@ import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { warmCode } from "./editor-rs/code.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
 import { COULDNT_START, NOT_KEPT, STOPPED, showFallback, unsavedActions, unsavedBanner } from "./editor-rs/fallback.ts";
-import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
+import { forgetAllUnsent, forgetUnsent, keepUnsent, keptUnsent, loadUnsent, type KeptEdits } from "./editor-rs/unsent.ts";
 import { forgetImageSizes } from "./editor-rs/render.ts";
 import { api, ApiError, rawUrl, setGuest, type AppEvent, type Me, type PresenceUserInfo, type Workspace, type ServerInfo, type Tree, type WorkspaceItem } from "./api.ts";
 import { anonIdentity, setAnonName, signInDialog, signInDirect, type AnonIdentity, type SignInReason } from "./signin.ts";
@@ -17,9 +17,8 @@ import { canGoBack, canGoForward, goBack, goForward, initNav, navPopped, navPush
 
 import { confirmDialog, copyText, deleteAccountDialog, promptDialog, shareDialog, welcomeDialog } from "./dialogs.ts";
 import { openFileSearch } from "./filesearch.ts";
-import { hostOf, newDialog, openDialog, type OpenChoice, type WorkspaceRef, forgetAllRemotes, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
+import { hostOf, newDialog, openDialog, type WorkspaceRef, forgetAllRemotes, forgetRemote, rememberedRemotes, rememberRemote, workspaceUrl } from "./workspaces.ts";
 import { demoResetPhrase } from "../shared/demo.ts";
-import { githubFileUrl } from "../shared/github.ts";
 import { autoNamePath, isUntitledPath, untitledPath } from "../shared/untitled.ts";
 import { NoteCache } from "./notecache.ts";
 import { NoteSocket } from "./notesocket.ts";
@@ -199,7 +198,6 @@ const breadcrumbEl = h("div", { class: "breadcrumb" });
 const backBtn = h("button", { type: "button", class: "icon-btn nav-btn", title: `Back (${IS_MAC ? "⌘" : "Ctrl+"}[)`, "aria-label": "Back", disabled: true, onclick: () => goBack() }, h("span", { class: "chev chev-left", "aria-hidden": "true" }));
 const forwardBtn = h("button", { type: "button", class: "icon-btn nav-btn", title: `Forward (${IS_MAC ? "⌘" : "Ctrl+"}])`, "aria-label": "Forward", disabled: true, onclick: () => goForward() }, h("span", { class: "chev", "aria-hidden": "true" }));
 const navEl = h("div", { class: "nav-btns" }, backBtn, forwardBtn);
-const sourceEl = h("div", { class: "doc-source" });
 const participantsEl = h("div", { class: "participants" });
 const saveStatusEl = h("div", { class: "save-status", "aria-live": "polite" });
 /** Line authors in the editor's margin, on unless turned off in this browser. */
@@ -221,8 +219,12 @@ let menuOpenerKey: string | null = null;
 void boot();
 
 async function boot() {
+  // edits a reload or crash left unacked: read before any note opens (they merge once it syncs)
+  const unsent = loadUnsent().catch(() => {});
+  window.addEventListener("pagehide", () => session?.provider?.checkUnsent());
   try {
     server = await take("server", api.server);
+    await unsent;
   } catch (err) {
     clear(app, h("div", { class: "fatal" }, "Couldn't reach the server: ", errorMessage(err)));
     return reveal();
@@ -379,7 +381,7 @@ function renderShell() {
     h("main", { class: "main" },
       h("header", { class: "doc-header" },
         h("button", { type: "button", class: "icon-btn sidebar-toggle", "aria-label": "Sidebar", "aria-expanded": "false", "aria-controls": "sidebar", onclick: () => setSidebarOpen(!app.classList.contains("sidebar-open")) }, h("span", { class: "burger", "aria-hidden": "true" })),
-        navEl, breadcrumbEl, sourceEl, h("div", { class: "spacer" }), saveStatusEl, participantsEl, reviewBtn, moreBtn,
+        navEl, breadcrumbEl, h("div", { class: "spacer" }), saveStatusEl, participantsEl, reviewBtn, moreBtn,
       ),
       docBody,
     ),
@@ -535,7 +537,6 @@ async function openSwitcher() {
     { label: "New…", run: () => newFolder() },
     { label: "Open…", run: () => openFolder() },
     ws ? "sep" : null,
-    ws?.kind === "github" && ws.ghOwner ? { label: "Open on GitHub", run: () => window.open(`https://github.com/${ws.ghOwner}/${ws.ghName}`, "_blank", "noopener") } : null,
   ];
   showMenu(switcherBtn, items, { keepOrder: true, className: "ws-menu" });
 }
@@ -739,7 +740,7 @@ function visited(): WorkspaceItem[] {
   try {
     const raw = JSON.parse(localStorage.getItem(VISITED_KEY) ?? "[]") as unknown;
     if (!Array.isArray(raw)) return [];
-    return raw.filter((w): w is WorkspaceItem => !!w && typeof w.id === "string" && !isDemoRoom(w.id) && typeof w.title === "string" && (w.kind === "notes" || w.kind === "github"));
+    return raw.filter((w): w is WorkspaceItem => !!w && typeof w.id === "string" && !isDemoRoom(w.id) && typeof w.title === "string" && w.kind === "notes");
   } catch {
     return [];
   }
@@ -804,22 +805,9 @@ function forgetVisited(id: string) {
   forgetLastNote(id);
 }
 
-/** "Open…": open a folder by name or URL (anyone: all folders are public), or add a GitHub repo (signed in, where the server allows it: GITHUB_COPIES). */
-function openFolder(start?: OpenChoice) {
-  const seq = routeSeq;
-  openDialog(server, {
-    openRemote: (ref) => void openRemote(ref),
-    added(repo) {
-      if (!repoById(repo.id)) repos = [...repos, repo];
-      void loadRepos();
-    },
-    async ready(repo, path, inDialog) {
-      await loadRepos();
-      // Imports that finish after the dialog was closed only open a note if the user hasn't gone elsewhere.
-      if (!path || (!inDialog && seq !== routeSeq)) return;
-      navigate(repo.id, path);
-    },
-  }, start, { github: signedIn });
+/** "Open…": open a folder by name or URL (anyone: all folders are public). */
+function openFolder() {
+  openDialog({ openRemote: (ref) => void openRemote(ref) });
 }
 
 /**
@@ -2448,7 +2436,6 @@ function renderHeader() {
   if (!session && history.open) history.close();
   if (!current) {
     clear(breadcrumbEl);
-    clear(sourceEl);
     clear(participantsEl);
     clear(saveStatusEl);
     return;
@@ -2462,11 +2449,6 @@ function renderHeader() {
     h("span", { class: "crumb-sep" }, "/"),
     h("span", { class: "crumb crumb-file", title: current.path }, displayName(current.path)),
   );
-  const fromGitHub = repo?.kind === "github" && repo.readOnly && repo.ghOwner && repo.ghName;
-  clear(sourceEl, fromGitHub
-    ? h("a", { class: "gh-source", href: githubFileUrl(repo.ghOwner!, repo.ghName!, repo.branch, current.path), target: "_blank", rel: "noopener noreferrer", title: `View ${current.path} on GitHub` },
-        "Read-only · from GitHub", h("span", { class: "ext", "aria-hidden": "true" }, " ↗"))
-    : null);
   renderParticipants();
   renderSaveStatus();
 }
@@ -2518,8 +2500,7 @@ function renderSaveStatus() {
       cls = "warn";
     } else text = session.slow ? "Connecting…" : "";
   } else if (session.readOnly) {
-    // Read-only GitHub copies say so next to the breadcrumb.
-    text = sourceEl.childElementCount ? "" : "Read-only";
+    text = "Read-only";
   } else {
     // Notes save themselves a few seconds after you stop typing, so there's nothing to show while connected.
     text = "";
@@ -2690,6 +2671,13 @@ class Session {
   private connect(p: RustCollab) {
     const { repo, path } = this;
     this.provider = p;
+    // edits the server hasn't acked: kept in IndexedDB until it has (merged on the next open after a reload or crash)
+    p.setPersist((k) => {
+      const older = keptUnsent(me.id, repo, path)?.older;
+      if (k) keepUnsent(me.id, repo, path, older ? { ...k, older } : k);
+      else if (older?.length) keepUnsent(me.id, repo, path, { generation: null, base: "", text: "", update: new Uint8Array(), older });
+      else forgetUnsent(me.id, repo, path);
+    });
     const ev: { on<K extends keyof CollabEvents>(type: K, fn: (...args: CollabEvents[K]) => void): () => void } = p;
     ev.on("synced", () => {
       if (session === this) saveLastNote(repo, path);
@@ -2723,9 +2711,14 @@ class Session {
       toast("Your unsaved edits from before the reload couldn't be restored.", "error");
       if (kept) this.showUnsaved(kept, "Your unsaved edits from before the reload couldn't be merged with the current note (it changed at the same places). Copy them to redo the edits.", false);
     });
-    ev.on("reset", () => {
+    ev.on("reset", (kept) => {
       if (session !== this) return;
-      toast("This note was reloaded from the server.");
+      // the note was rebuilt on the server (a new epoch): our edits it may not have are merged by text on reopening
+      if (kept) {
+        const older = keptUnsent(me.id, repo, path)?.older;
+        keepUnsent(me.id, repo, path, older ? { ...kept, older } : kept);
+      }
+      toast(kept ? "This note was reloaded from the server; your edits are being merged back in." : "This note was reloaded from the server.");
       closeSession();
       openFile(repo, path);
     });

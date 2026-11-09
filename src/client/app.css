@@ -2192,69 +2192,6 @@ input[type="radio"] {
   color: var(--muted);
   font-size: 12.5px;
 }
-/* "Open…": choices on the left, the chosen form on the right. */
-.open-modal {
-  width: min(620px, calc(100vw - 32px));
-}
-.open-dlg {
-  display: grid;
-  grid-template-columns: 168px 1fr;
-  min-height: 248px;
-  margin-top: 14px;
-  border-top: 1px solid var(--line-soft);
-}
-.open-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 12px 10px 16px;
-  background: var(--paper-2);
-  border-bottom-left-radius: var(--radius-lg);
-}
-.open-section {
-  padding: 10px 10px 4px;
-  color: var(--grey);
-  font: 600 11.5px/1.2 var(--font-ui);
-  letter-spacing: 0.01em;
-}
-.open-section:first-child {
-  padding-top: 2px;
-}
-.open-choice {
-  padding: 6px 10px;
-  border: 0;
-  border-radius: var(--radius);
-  background: none;
-  color: var(--ink-2);
-  font: 500 13.5px/1.3 var(--font-ui);
-  text-align: left;
-  cursor: pointer;
-}
-.open-choice:hover {
-  background: var(--tint-hover);
-}
-.open-choice[aria-selected="true"] {
-  background: var(--tint-active);
-  color: var(--ink);
-}
-.open-choice:focus-visible {
-  outline: none;
-  box-shadow: var(--focus);
-}
-.open-panes {
-  min-width: 0;
-}
-.open-pane {
-  padding-top: 16px;
-}
-@media (max-width: 520px) {
-  .open-dlg {
-    grid-template-columns: 1fr;
-  }
-  .open-nav {
-    border-radius: 0;
-  }
-}
 /* "Share with an agent": two sections (this workspace; all of them over MCP), each a heading, a line, a
    monospace field with its own Copy and a Copy prompt button; a hairline between them */
 .share-modal {
@@ -2481,28 +2418,6 @@ input[type="radio"] {
   }
 }
 
-/* ---------- GitHub repos ---------- */
-
-.doc-source {
-  flex: none;
-  display: flex;
-  min-width: 0;
-}
-.gh-source {
-  padding: 3px 8px;
-  border-radius: var(--radius);
-  background: var(--paper-2);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-  text-decoration: none;
-}
-.gh-source:hover {
-  background: var(--tint-hover);
-  color: var(--ink);
-}
-
 /* ---------- small screens ---------- */
 
 .sidebar-toggle,
@@ -2572,8 +2487,7 @@ input[type="radio"] {
   .nav-btns {
     margin-left: 0;
   }
-  .participants,
-  .doc-source {
+  .participants {
     display: none;
   }
   .history {

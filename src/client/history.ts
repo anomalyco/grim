@@ -88,7 +88,7 @@ export class HistoryPanel {
 
   private renderList(commits: Commit[]) {
     if (!commits.length) {
-      clear(this.body, h("p", { class: "empty" }, "No saved versions yet. Changes are committed after a short pause, or press ⌘S."));
+      clear(this.body, h("p", { class: "empty" }, "No versions yet. Edits become a version after a few minutes without changes (an agent's right away)."));
       return;
     }
     clear(this.body, h("ul", { class: "commits" }, commits.map((c, i) =>
@@ -170,7 +170,7 @@ export class HistoryPanel {
 }
 
 export function renderDiff(diff: string): HTMLElement {
-  if (!diff.trim()) return h("p", { class: "muted pad" }, "No changes to this file in this commit.");
+  if (!diff.trim()) return h("p", { class: "muted pad" }, "No changes to this note in this version.");
   const pre = h("pre", { class: "diff" });
   for (const line of diff.replace(/\n$/, "").split("\n")) {
     let cls = "ctx";

@@ -45,20 +45,6 @@ CREATE TABLE IF NOT EXISTS repos (
   created_by TEXT,
   created_at INTEGER NOT NULL
 );
--- Crash-safe log of live edits that are not committed yet. Cleared when a room closes cleanly.
-CREATE TABLE IF NOT EXISTS room_meta (
-  room TEXT PRIMARY KEY,
-  generation TEXT NOT NULL,
-  base_commit TEXT,
-  base_content TEXT NOT NULL,
-  base_snapshot BLOB NOT NULL
-);
-CREATE TABLE IF NOT EXISTS room_updates (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  room TEXT NOT NULL,
-  data BLOB NOT NULL
-);
-CREATE INDEX IF NOT EXISTS room_updates_room ON room_updates(room, seq);
 -- Agent tokens were replaced by share links.
 DROP TABLE IF EXISTS agent_tokens;
 `);
@@ -134,14 +120,9 @@ DROP TABLE IF EXISTS anon_ip_days;
   }
 })();
 
-// Line authors (blame.ts) survive a restart with the crash log: each logged update says whose it was (an index into
-// room_meta.blame_people), and the compacted state carries the line values it ends with (room_meta.blame).
-db.transaction(() => {
-  if (!columns("room_updates").includes("author")) db.exec("ALTER TABLE room_updates ADD COLUMN author INTEGER");
-  const meta = columns("room_meta");
-  if (!meta.includes("blame")) db.exec("ALTER TABLE room_meta ADD COLUMN blame TEXT");
-  if (!meta.includes("blame_people")) db.exec("ALTER TABLE room_meta ADD COLUMN blame_people TEXT");
-})();
+// Storage v2 (docs/storage-v2.md): notes live in the notes tables (notes/store.ts); the Git-era crash log and GitHub
+// workspaces are gone. Same as migrations/0011_storage_v2.sql.
+db.exec("DROP TABLE IF EXISTS room_updates; DROP TABLE IF EXISTS room_meta; DELETE FROM repos WHERE kind = 'github';");
 
 // Tokens for one resource (MCP clients' tokens: oauth.ts). Same as migrations/0007_token_audience.sql.
 if (!columns("app_tokens").includes("audience")) db.exec("ALTER TABLE app_tokens ADD COLUMN audience TEXT");

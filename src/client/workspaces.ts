@@ -1,6 +1,6 @@
 // Workspaces: remote workspace URLs, the remembered workspaces on other servers, and the Open and New dialogs.
 import type { ServerInfo } from "./api.ts";
-import { gitHubForm, modal, type AddGitHubHooks, type DialogHost } from "./dialogs.ts";
+import { modal, type DialogHost } from "./dialogs.ts";
 import { errorMessage, h, toast } from "./util.ts";
 
 // ---------- remote workspace URLs ----------
@@ -100,75 +100,18 @@ export function forgetRemote(ref: { origin: string; workspace: string }) {
 
 // ---------- dialogs ----------
 
-export type OpenChoice = "open-remote" | "open-github";
-
-export interface OpenHooks extends AddGitHubHooks {
+export interface OpenHooks {
   /** A remote folder URL to open (this server or another). */
   openRemote(ref: WorkspaceRef): void;
 }
 
-/**
- * "Open…": one dialog for opening a folder or note by URL (any server) or adding a GitHub repo.
- * The choices are a list on the left, the chosen form on the right; with GitHub repos not offered, just the URL form.
- */
-export function openDialog(server: ServerInfo, hooks: OpenHooks, start: OpenChoice = "open-remote", opts: { github?: boolean } = {}) {
+/** "Open…": open a folder or note by URL (any server) or by workspace name. */
+export function openDialog(hooks: OpenHooks) {
   let open = true;
-  const host: DialogHost = { close: () => dlg.close(), isOpen: () => open };
-  // Adding a GitHub repo creates a folder on the server: signed in only, and only where the server allows it
-  // (GITHUB_COPIES). Opening one by name or URL needs nothing.
-  const github = (opts.github ?? true) && server.githubCopies !== false;
-  if (!github) {
-    // the one choice left: just its form, no list of choices
-    const only = remoteForm(hooks, { close: () => dlg.close(), isOpen: () => open });
-    const dlg = modal("Open workspace", only.form, { className: "open-url-modal" });
-    dlg.addEventListener("close", () => (open = false));
-    only.focus();
-    return;
-  }
-  const panes: Partial<Record<OpenChoice, { form: HTMLElement; focus(): void }>> = {
-    "open-remote": remoteForm(hooks, host),
-    "open-github": gitHubForm(server, hooks, host),
-  };
-  const tabs = new Map<OpenChoice, HTMLButtonElement>();
-  const tab = (choice: OpenChoice, label: string) => {
-    const b = h("button", { type: "button", class: "open-choice", role: "tab", id: `open-tab-${choice}`, "aria-controls": `open-pane-${choice}`, "data-choice": choice, onclick: () => pick(choice, true) }, label) as HTMLButtonElement;
-    tabs.set(choice, b);
-    return b;
-  };
-  const nav = h("div", { class: "open-nav", role: "tablist", "aria-orientation": "vertical", "aria-label": "What to open" },
-    h("div", { class: "open-section" }, "Open"),
-    tab("open-remote", "URL"),
-    tab("open-github", "GitHub repo"),
-  );
-  nav.addEventListener("keydown", (e) => {
-    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-    e.preventDefault();
-    const order = [...tabs.keys()];
-    const i = order.findIndex((c) => tabs.get(c) === document.activeElement);
-    const next = order[(i + (e.key === "ArrowDown" ? 1 : order.length - 1)) % order.length]!;
-    pick(next, false);
-    tabs.get(next)!.focus();
-  });
-  for (const [choice, p] of Object.entries(panes) as [OpenChoice, { form: HTMLElement }][]) {
-    p.form.classList.add("open-pane");
-    p.form.id = `open-pane-${choice}`;
-    p.form.setAttribute("role", "tabpanel");
-    p.form.setAttribute("aria-labelledby", `open-tab-${choice}`);
-  }
-  const body = h("div", { class: "open-dlg" }, nav, h("div", { class: "open-panes" }, ...Object.values(panes).map((p) => p.form)));
-  function pick(choice: OpenChoice, focusField: boolean) {
-    if (!panes[choice]) choice = "open-remote";
-    for (const [c, b] of tabs) {
-      b.setAttribute("aria-selected", String(c === choice));
-      b.tabIndex = c === choice ? 0 : -1;
-      panes[c]!.form.hidden = c !== choice;
-    }
-    if (focusField) panes[choice]!.focus();
-  }
-  const dlg = modal("Open workspace", body, { wide: true });
-  dlg.classList.add("open-modal");
+  const only = remoteForm(hooks, { close: () => dlg.close(), isOpen: () => open });
+  const dlg = modal("Open workspace", only.form, { className: "open-url-modal" });
   dlg.addEventListener("close", () => (open = false));
-  pick(start, true);
+  only.focus();
 }
 
 function remoteForm(hooks: OpenHooks, host: DialogHost) {

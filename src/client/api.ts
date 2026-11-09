@@ -31,10 +31,7 @@ export interface Me {
 export interface Workspace {
   id: string;
   title: string;
-  kind: "notes" | "github";
-  ghOwner: string | null;
-  ghName: string | null;
-  branch: string;
+  kind: "notes";
   status: string;
   error: string | null;
   readOnly: boolean;
@@ -127,7 +124,6 @@ export const api = {
   /** My workspaces on this server (every workspace, on a server without sign-in). */
   workspaces: () => req<Workspace[]>("GET", "/api/workspaces"),
   createWorkspace: (title: string) => req<Workspace>("POST", "/api/workspaces", { title }),
-  addGitHub: (github: string, readOnly: boolean) => req<Workspace>("POST", "/api/workspaces", { github, readOnly }),
   /** An account's own workspace to land in (made the first time: "<First name>'s notes"; `created` on that call). */
   personalWorkspace: () => req<Workspace & { created?: boolean }>("POST", "/api/workspaces/personal"),
   /** Add workspaces to my list (those that still exist): what this browser opened before signing in. */

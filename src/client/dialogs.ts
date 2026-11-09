@@ -1,6 +1,5 @@
-// Modal dialogs: prompt, confirm, add a GitHub repo; the agent prompt and copying text.
+// Modal dialogs: prompt, confirm; the agent prompt and copying text.
 import { api, type ServerInfo, type Workspace } from "./api.ts";
-import { parseGitHubRepo } from "../shared/github.ts";
 import { errorMessage, h, pickNote, toast } from "./util.ts";
 
 /** `backdrop: false`: a click outside doesn't close it (only its own buttons and Escape do). */
@@ -138,114 +137,22 @@ export function deleteAccountDialog(email: string, remove: () => Promise<void>):
   });
 }
 
-export interface AddGitHubHooks {
-  /** The repo was added (or already existed): show it in the sidebar. */
-  added(repo: Workspace): void;
-  /** The repo is ready to browse; `path` is the note to open, if any. `inDialog`: the dialog was still open. */
-  ready(repo: Workspace, path: string | null, inDialog: boolean): void;
-}
-
 /** The dialog a form lives in (the Open dialog): close it, and whether it is still open. */
 export interface DialogHost {
   close(): void;
   isOpen(): boolean;
 }
 
-/** Add a GitHub repo by URL or owner/name, wait for its import, then hand back the note to open. */
-export function gitHubForm(server: ServerInfo, hooks: AddGitHubHooks, host: DialogHost) {
-  const input = h("input", { type: "text", placeholder: "https://github.com/owner/name", required: true, autocomplete: "off", spellcheck: "false" });
-  const readOnlyRadio = h("input", { type: "radio", name: "gh-mode", value: "read", checked: true });
-  const editRadio = h("input", { type: "radio", name: "gh-mode", value: "edit" });
-  const installHint = server.githubAppSlug
-    ? h("p", { class: "hint", hidden: true }, "Editing syncs both ways and needs the ",
-        h("a", { href: `https://github.com/apps/${server.githubAppSlug}/installations/new`, target: "_blank", rel: "noopener" }, "Grim GitHub App"),
-        " installed on the repo.")
-    : null;
-  const status = h("p", { class: "hint gh-status", hidden: true });
-  const error = h("p", { class: "form-error", hidden: true });
-  const submit = h("button", { type: "submit", class: "btn btn-primary" }, "Add");
-  const form = h("form", { class: "modal-body" },
-    h("label", { class: "field" }, h("span", null, "GitHub URL or owner/name"), input),
-    server.githubAppSlug
-      ? h("div", { class: "radio-group", role: "radiogroup", "aria-label": "Access" },
-          h("label", { class: "check" }, readOnlyRadio, h("span", null, "Read-only")),
-          h("label", { class: "check" }, editRadio, h("span", null, "Edit (needs the GitHub App installed)")),
-        )
-      : null,
-    installHint,
-    h("p", { class: "hint" }, "Shows the repo's Markdown files and keeps them up to date with GitHub. Read-only works for any public repo."),
-    status,
-    error,
-    h("div", { class: "modal-actions" },
-      h("button", { type: "button", class: "btn", onclick: () => host.close() }, "Cancel"),
-      submit,
-    ),
-  );
-  for (const r of [readOnlyRadio, editRadio]) r.addEventListener("change", () => installHint && (installHint.hidden = !editRadio.checked));
-
-  let busy = false;
-  const showError = (msg: string) => {
-    status.hidden = true;
-    if (host.isOpen()) {
-      error.textContent = msg;
-      error.hidden = false;
-    } else toast(msg, "error");
-  };
-
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (busy) return;
-    const raw = input.value.trim();
-    const ref = parseGitHubRepo(raw);
-    if (!ref) return showError("Enter a GitHub URL (https://github.com/owner/name) or owner/name.");
-    busy = true;
-    submit.disabled = true;
-    error.hidden = true;
-    status.hidden = false;
-    status.textContent = `Looking up ${ref.owner}/${ref.name}…`;
-    try {
-      let repo = await api.addGitHub(raw, !editRadio.checked);
-      hooks.added(repo);
-      while (repo.status === "importing") {
-        status.textContent = `Copying ${repo.title} from GitHub…`;
-        await new Promise((r) => setTimeout(r, 1000));
-        repo = await api.repo(repo.id);
-      }
-      if (repo.status === "error") {
-        // A failed copy is useless in the sidebar; take it out again if we may (adding again retries).
-        if (repo.canRemove) await api.deleteRepo(repo.id).catch(() => {});
-        return showError(repo.error ?? "Import failed.");
-      }
-      const files = (await api.tree(repo.id)).files;
-      if (!files.length) return showError(`No Markdown files in ${repo.title}.`);
-      // The file from a /blob/ URL, or the folder from a /tree/ URL.
-      const rest = ref.rest.join("/");
-      const sub = ref.kind && rest.startsWith(`${repo.branch}/`) ? rest.slice(repo.branch.length + 1) : "";
-      const path = pickNote(files, ref.kind === "blob" ? { file: sub } : { folder: sub });
-      const inDialog = host.isOpen();
-      host.close();
-      hooks.ready(repo, path, inDialog);
-    } catch (err) {
-      showError(errorMessage(err));
-    } finally {
-      busy = false;
-      submit.disabled = false;
-    }
-  });
-  return { form, focus: () => input.focus() };
-}
-
-
 /** The ready-to-paste instructions for an agent, with the workspace's URL (the native app's, word for word). */
 export function agentPrompt(url: string, noSignIn: boolean) {
-  const guest = noSignIn ? "" : " Without a token you can edit existing notes, but not create, rename or delete them; for full access, use Grim's MCP server.";
-  return `Work in this Grim workspace: ${url}\nGET that URL (plain HTTP, e.g. curl) for instructions, then POST shell commands to the same URL to read and edit its Markdown notes.${guest}`;
+  const guest = noSignIn ? "" : " Without a token you can edit existing notes but not create new ones; for that, use Grim's MCP server.";
+  return `Work in this Grim workspace: ${url}\nGET that URL (plain HTTP, e.g. curl) for its notes and instructions. Each note has its own URL: POST a shell command to a note's URL to run it with that note as the only file (cat, sed -i, grep, >>; history for its versions).${guest}`;
 }
 
 /** The MCP section's prompt: add the server's `/mcp` to the agent's MCP configuration (the native app's, word for word). */
 export function mcpPrompt(mcpUrl: string, noSignIn: boolean) {
   const auth = noSignIn ? "no sign-in needed on this server" : "it signs in with OAuth in the browser the first time";
-  return `Add the Grim MCP server to your MCP configuration: URL ${mcpUrl} (Streamable HTTP; ${auth}). Then use its list_workspaces, command and changes tools to work in my Grim workspaces.`;
+  return `Add the Grim MCP server to your MCP configuration: URL ${mcpUrl} (Streamable HTTP; ${auth}). Then use its list_workspaces, list_notes and note_command tools to work on my Grim notes, one note per command.`;
 }
 
 /** The "opencode config" disclosure: opencode's MCP config (docs/README.md, "Connect an MCP client"). */
@@ -295,8 +202,8 @@ export function shareDialog(opts: { url: string; noSignIn: boolean }) {
     sec("ws", "This workspace",
       h("p", { class: "hint" },
         opts.noSignIn
-          ? "Give this prompt to an agent. It works with this workspace at its URL over plain HTTP (no setup): it GETs the URL for instructions and POSTs commands to it."
-          : "Give this prompt to an agent. It works with this workspace at its URL over plain HTTP (no setup). Without a token it can read and edit existing notes; for full access, use MCP (below)."),
+          ? "Give this prompt to an agent. It works with this workspace over plain HTTP (no setup): it GETs the URL for the notes and instructions, then POSTs commands to a note's URL, one note at a time."
+          : "Give this prompt to an agent. It works with this workspace over plain HTTP (no setup), one note at a time: GET the URL for the notes, POST commands to a note's URL. Without a token it can read and edit existing notes; to create notes, use MCP (below)."),
       linkField.el,
       h("div", { class: "share-btns" }, promptBtn),
     ),
