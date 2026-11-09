@@ -217,7 +217,7 @@ describe("the note shell", () => {
     r = await run("echo x > other.md; echo ok");
     expect(r.stderr).toContain("discarded");
     r = await run("history");
-    expect(r.stdout).toMatch(/^[0-9a-f]{12} .* agent +Bot/m);
+    expect(r.stdout).toMatch(/^v\d+ .* agent +Bot/m);
     const id = r.stdout.split(" ")[0]!;
     r = await run(`history show ${id}`);
     expect(r.stdout).toBe("# Todo\n- [x] milk\n");

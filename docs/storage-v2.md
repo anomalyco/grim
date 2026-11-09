@@ -34,7 +34,7 @@ CREATE UNIQUE INDEX notes_path ON notes(ws, path) WHERE deleted_at IS NULL;
 CREATE TABLE note_updates (note_id TEXT, epoch INTEGER, seq INTEGER, data BLOB, author INTEGER,
   PRIMARY KEY (note_id, seq)) WITHOUT ROWID;   -- the tail since the last compaction (the old crash log)
 CREATE TABLE versions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,   -- shown as 12 hex digits: the API's "sha"
+  id INTEGER PRIMARY KEY AUTOINCREMENT,   -- shown as "v<id>": the API's "sha"
   ws TEXT NOT NULL, note_id TEXT NOT NULL,
   kind TEXT NOT NULL,             -- edit | agent | restore | rename | delete | import
   path TEXT NOT NULL,             -- the note's path when cut
@@ -84,7 +84,7 @@ A version is a plain-text snapshot of the note with the people who made it. One 
 ## 4. History, diff, file and restore (HTTP shapes kept)
 
 - `GET /api/workspace/:id/history?path=&limit=` → `[{ sha, message, authorName, authorEmail, date }]`, newest first.
-  - `sha` is the version id (12 hex digits).
+  - `sha` is the version id ("v47").
   - `authorName`/`authorEmail` are the main author's (guests: `"<name> (guest)"` / `guest@grimoire.invalid`; agents: `…@agents.grimoire`).
   - `message` is `"Update <path>"` (`Restore …`, `Rename … to …`, `Delete …`), with `Co-authored-by:` lines for the other contributors.
 - `GET …/diff?sha=&path=` → `{ diff }`: a unified diff of that version against the note's previous one.

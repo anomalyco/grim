@@ -71,12 +71,12 @@ export interface ImageRow {
   size: number;
 }
 
-/** A version id as the API shows it (its "sha"): 12 hex digits. */
-export const versionRef = (id: number) => id.toString(16).padStart(12, "0");
-/** A version id from the API, or null if it isn't one. */
+/** A version id as the API shows it (its "sha"): "v" and the number ("v47"); clients show the first 7 characters. */
+export const versionRef = (id: number) => `v${id}`;
+/** A version id from the API ("v47", or "47"), or null if it isn't one. */
 export function parseVersionRef(ref: string): number | null {
-  if (!/^[0-9a-f]{1,16}$/i.test(ref)) return null;
-  const n = parseInt(ref, 16);
+  const m = /^v?(\d{1,15})$/.exec(ref);
+  const n = m ? Number(m[1]) : NaN;
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 

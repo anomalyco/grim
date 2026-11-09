@@ -1,5 +1,7 @@
 # Self-hosting Grim
 
+> **Storage v2 (2026-11-09, staging and Grim Beta):** notes are no longer stored in Git. See [storage-v2.md](storage-v2.md): each workspace's notes, versions, search index and image map live in its Durable Object's SQLite (Bun: `grimoire.sqlite`); agents get a shell over one note at a time (`POST /app/<ws>/<note>`). What this doc says about Git, commits, Code Storage, GitHub workspaces, crash logs, Git blame, the workspace-wide shell (`NotesFs`, `ShellSessions`, `ShellDO`) and `changes` is history.
+
 Grim is one Bun process. Run it on your laptop, a home server or a small VPS, and your notes stay on that machine: each workspace is a Git repo in a folder you choose, next to one SQLite file.
 
 - [Why self-host](#why-self-host)

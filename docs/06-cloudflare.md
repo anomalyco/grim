@@ -1,5 +1,7 @@
 # Grimoire on Cloudflare: architecture as built
 
+> **Storage v2 (2026-11-09, staging and Grim Beta):** notes are no longer stored in Git. See [storage-v2.md](storage-v2.md): each workspace's notes, versions, search index and image map live in its Durable Object's SQLite (Bun: `grimoire.sqlite`); agents get a shell over one note at a time (`POST /app/<ws>/<note>`). What this doc says about Git, commits, Code Storage, GitHub workspaces, crash logs, Git blame, the workspace-wide shell (`NotesFs`, `ShellSessions`, `ShellDO`) and `changes` is history.
+
 > Terminology: a **workspace** is one Git repo (the `repos` table, `/api/workspaces`, `repoId` in code); a **folder** is a directory inside a workspace.
 
 The hosted service ([grimnotes.app](https://grimnotes.app), staging at `staging.grimnotes.app`) runs on Cloudflare Workers and Durable Objects. Self-hosting stays one Bun process (`bun run start`, see [Self-hosting](self-hosting.md)). Both run the same code in `src/server/`. Only three things differ between them, and each is a small interface (a **seam**) with one implementation per runtime. Everything else (routing, auth, the API, rooms, the agent shell, Git stores) is shared.

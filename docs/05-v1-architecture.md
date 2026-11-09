@@ -1,5 +1,7 @@
 # Grimoire V1: architecture and internal contracts
 
+> **Storage v2 (2026-11-09, staging and Grim Beta):** notes are no longer stored in Git. See [storage-v2.md](storage-v2.md): each workspace's notes, versions, search index and image map live in its Durable Object's SQLite (Bun: `grimoire.sqlite`); agents get a shell over one note at a time (`POST /app/<ws>/<note>`). What this doc says about Git, commits, Code Storage, GitHub workspaces, crash logs, Git blame, the workspace-wide shell (`NotesFs`, `ShellSessions`, `ShellDO`) and `changes` is history.
+
 > Terminology (2026-10-28, owner): the top-level thing (one Git repo; the switcher's entries) is a **workspace** in the UI (and in the API/code: `/api/workspaces`, `repos`); a **folder** is a directory inside a workspace.
 
 Grimoire: a multiplayer markdown notebook. People edit in the browser with live cursors; agents work in a bash shell over the same notes (through a notebook's "Share with agent" link). Everything is stored in Git via Code Storage (or local bare repos in dev). This doc is the contract that the server, MCP, client shell, and editor are built against.
