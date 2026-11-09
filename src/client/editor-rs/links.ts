@@ -4,6 +4,7 @@
 
 import { cleanSrc } from "./images.ts";
 import type { RLine } from "./lineview.ts";
+import { extensionOf } from "../../shared/paths.ts";
 
 export type LinkTarget =
   /** http(s) / mailto elsewhere: a new tab. */
@@ -85,8 +86,8 @@ export function linkTarget(raw: string, ctx: LinkContext = {}): LinkTarget {
   if (!parts.length || /\/\.{0,2}$/.test(path)) return { kind: "none" };
   const name = parts[parts.length - 1]!;
   if (NOTE_EXT.test(name)) return { kind: "file", path: parts.join("/"), note: true, fragment };
-  // no extension: a note ("plan" -> plan.md)
-  if (!/\.[^.]+$/.test(name.replace(/^\.+/, ""))) return { kind: "file", path: parts.join("/") + ".md", note: true, fragment };
+  // no extension: a note ("plan" -> plan.md; only the last segment counts, shared/paths.ts)
+  if (!extensionOf(name)) return { kind: "file", path: parts.join("/") + ".md", note: true, fragment };
   return { kind: "file", path: parts.join("/"), note: false, fragment };
 }
 

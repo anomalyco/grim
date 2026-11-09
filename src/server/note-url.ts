@@ -11,6 +11,7 @@ import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
 import { cleanPath } from "./repos.ts";
 import { isUnfurler } from "./share-meta.ts";
+import { isFilePath } from "../shared/paths.ts";
 
 /** The same URL answers HTML or Markdown: caches must key on Accept, and live text is never stored. */
 const NEGOTIATED = { vary: "Accept", "cache-control": "no-store", "x-content-type-options": "nosniff" };
@@ -80,8 +81,8 @@ export async function noteUrlResponse(url: URL, ctx: Ctx): Promise<Response> {
       res.headers.set("vary", "Accept");
       return res;
     }
-    if (path) {
-      // a note, with .md added when the path has no Markdown extension (as the app's links resolve); the live text
+    if (path && !isFilePath(path)) {
+      // a note, with .md added when the last segment has no extension (shared/paths.ts, as the app's links resolve); the live text
       const note = cleanPath(path);
       if (!note) return notFound(path);
       const read = await ops.readFile(ctx, repo, note).catch((e: unknown) => {

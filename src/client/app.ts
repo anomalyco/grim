@@ -1,4 +1,5 @@
 // App shell: sidebar (repos, file tree, search files), document header, editor session, history, routing.
+import { isFilePath, withNoteExtension } from "../shared/paths.ts";
 import { uiFontsLoaded } from "./fonts.ts";
 import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
@@ -819,7 +820,9 @@ async function openRemote(ref: WorkspaceRef) {
   if (ref.origin === location.origin) {
     let path = ref.path;
     if (path) {
-      if (!MD_EXT.test(path)) path += ".md";
+      path = withNoteExtension(path);
+      // a file (an image): the server's, in a tab of its own
+      if (isFilePath(path)) return void window.open(rawUrl(ref.workspace, path), "_blank", "noopener,noreferrer");
       try {
         const tree = await api.tree(ref.workspace);
         const found = tree.files.includes(path) ? path : tree.files.find((f) => f.toLowerCase() === path!.toLowerCase());
@@ -1913,7 +1916,7 @@ function parseRoute(): { repo: string; path: string | null } | null {
   try {
     const repo = decodeURIComponent(m[1]!);
     let path = m[2] ? m[2].split("/").filter((s) => s && s !== "." && s !== "..").map(decodeURIComponent).join("/") : "";
-    if (path && !MD_EXT.test(path)) path += ".md";
+    path = withNoteExtension(path);
     return { repo, path: path || null };
   } catch {
     return null;
@@ -2070,6 +2073,8 @@ async function route() {
   }
   if (!(await openWorkspace(id))) return;
   if (seq !== routeSeq) return;
+  // a file's URL (an image): the file itself, not a note
+  if (r?.path && isFilePath(r.path)) return location.replace(rawUrl(id, r.path));
   if (r?.path) {
     const canonical = urlFor(id, r.path);
     if (location.pathname !== canonical) navReplace(canonical + location.search + location.hash);

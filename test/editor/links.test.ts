@@ -47,6 +47,14 @@ describe("link targets", () => {
     expect(t("/Welcome")).toEqual(note("Welcome.md"));
   });
 
+  test(".md only when the last segment has no extension (folders with dots don't count)", () => {
+    expect(t("v2.0/plan")).toEqual(note("notes/v2.0/plan.md"));
+    expect(t("Meeting 3.5 notes")).toEqual(note("notes/Meeting 3.5 notes.md"));
+    expect(t("images/a.png").kind).toBe("file");
+    expect(t("data.json")).toMatchObject({ kind: "file", path: "notes/data.json", note: false });
+    expect(t("v1.2")).toMatchObject({ kind: "file", path: "notes/v1.2", note: false });
+  });
+
   test("leaving the notebook", () => {
     expect(t("../../x.md")).toEqual({ kind: "outside", path: "../../x.md" });
     expect(t("/../x.md")).toEqual({ kind: "outside", path: "/../x.md" });
