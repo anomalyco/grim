@@ -11,9 +11,6 @@ function secret(name: string): string {
   return (process.env[name] ?? "").replace(/\\n/g, "\n");
 }
 
-const codeStorageOrg = env("CODE_STORAGE_ORG");
-const codeStorageKey = secret("CODE_STORAGE_PRIVATE_KEY");
-
 export const config = {
   port: Number(env("PORT", "8787")),
   publicUrl: env("PUBLIC_URL", `http://localhost:${env("PORT", "8787")}`).replace(/\/$/, ""),
@@ -21,21 +18,9 @@ export const config = {
   // loopback on the VM. See proxy.ts.
   trustedProxies: env("TRUSTED_PROXIES", "127.0.0.0/8,::1"),
   dataDir: resolve(env("DATA_DIR", "./data")),
-  storage: (env("STORAGE") || (codeStorageOrg && codeStorageKey ? "codestorage" : "local")) as "codestorage" | "local",
-  codeStorage: {
-    org: codeStorageOrg,
-    key: codeStorageKey,
-    apiBaseUrl: env("CODE_STORAGE_API_URL") || undefined,
-    storageBaseUrl: env("CODE_STORAGE_GIT_URL") || undefined,
-    // Prepended to every repo id sent to Code Storage (e.g. "stg-" for staging, which shares production's org).
-    repoPrefix: env("CODE_STORAGE_REPO_PREFIX"),
-  },
   github: {
     clientId: env("GITHUB_CLIENT_ID"),
     clientSecret: secret("GITHUB_CLIENT_SECRET"),
-    appSlug: env("GITHUB_APP_SLUG"),
-    // Where GitHub repos are cloned from in local mode (tests point it at file:// repos).
-    gitBase: env("GITHUB_GIT_BASE", "https://github.com").replace(/\/$/, ""),
   },
   // Cache session and app-token lookups in memory (auth.ts): on for Workers, off by default on Bun.
   authCache: env("AUTH_CACHE") === "1",
@@ -64,22 +49,12 @@ export const config = {
   },
   // Shown to clients (GET /api/server); defaults to PUBLIC_URL's host.
   serverName: env("SERVER_NAME"),
-  defaultBranch: env("DEFAULT_BRANCH", "main"),
-  quietMs: Number(env("QUIET_MS", "3000")),
   // Workspaces where guests (signed out) may also create, rename and delete notes and folders and upload images, not
   // only edit notes: comma list of ids, default the demo (the public playground). "" = none.
   guestCreate: new Set((process.env.GUEST_CREATE_WORKSPACES ?? "demo").split(",").map((s: string) => s.trim()).filter(Boolean)),
   // The demo folder (demo.ts) goes back to its seed this often, in minutes (0: never, except on restart).
   // DEMO_RESET_MINUTES wins; the older DEMO_RESET_HOURS still works when it isn't set. Default 15 minutes.
   demoResetMinutes: env("DEMO_RESET_MINUTES") ? Number(env("DEMO_RESET_MINUTES")) : env("DEMO_RESET_HOURS") ? Number(env("DEMO_RESET_HOURS")) * 60 : 15,
-  // GITHUB_COPIES=on|off: adding GitHub repos as workspaces (POST /api/workspaces {github}) and refreshing the
-  // read-only copies from GitHub. off, the default: the API refuses (403), clients hide the option (GET /api/server
-  // githubCopies), and copies added before stay readable as ordinary read-only workspaces that no longer refresh.
-  githubCopiesEnabled: /^(on|true|1|yes)$/i.test(env("GITHUB_COPIES")),
-  // How often read-only GitHub repos are refreshed from GitHub.
-  upstreamRefreshMs: Number(env("UPSTREAM_REFRESH_MS", "300000")),
-  // Read-only GitHub copies: how many in total, and how many one person may add.
-  githubCopies: { max: Number(env("MAX_GITHUB_REPOS", "100")), perUser: Number(env("MAX_GITHUB_REPOS_PER_USER", "10")) },
   // METRICS=on|off: count launch events (signups, demo opens, landing views, …) in this server's own database
   // (metrics.ts: counts per day, no personal data, never sent anywhere). On by default; off records nothing.
   metrics: !/^(off|false|0|no)$/i.test(env("METRICS")),
@@ -90,19 +65,12 @@ export const config = {
 
 // Secrets stay readable and writable but are accessors over a closure (not enumerable, shown as [Getter/Setter]):
 // logging or serializing config (or a part of it) can't print them.
-for (const [obj, key] of [[config.codeStorage, "key"], [config.github, "clientSecret"], [config.google, "clientSecret"]] as const) {
+for (const [obj, key] of [[config.github, "clientSecret"], [config.google, "clientSecret"]] as const) {
   let value = (obj as Record<string, string>)[key];
   Object.defineProperty(obj, key, { get: () => value, set: (v: string) => (value = v), enumerable: false, configurable: true });
 }
 
 export type Config = typeof config;
-
-/** Test processes (test/local-storage.ts sets GRIMOIRE_TEST) must never reach Code Storage. */
-export function assertTestStorage(): void {
-  if (process.env.GRIMOIRE_TEST && config.storage !== "local") {
-    throw new Error(`refusing to start a test server with STORAGE=${config.storage}: tests must use STORAGE=local (see test/local-storage.ts)`);
-  }
-}
 
 /**
  * Guests may create, rename, delete and upload in this workspace (GUEST_CREATE_WORKSPACES; else they only edit).
@@ -116,12 +84,4 @@ export function guestCreate(repoId: string): boolean {
 /** The test sign-in (/auth/dev): ALLOW_DEV_LOGIN=1 on a plain-http server only, so never on a real deployment. */
 export function devLoginEnabled(): boolean {
   return config.signIn && config.allowDevLogin && config.publicUrl.startsWith("http://");
-}
-
-/**
- * Edits to a linked GitHub repo only reach GitHub through Code Storage's sync, which needs the GitHub App.
- * Without both, GitHub repos are read-only copies.
- */
-export function canEditGitHub(): boolean {
-  return config.storage === "codestorage" && !!config.github.appSlug;
 }

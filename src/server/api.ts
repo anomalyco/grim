@@ -1,13 +1,11 @@
 import { createHash } from "node:crypto";
-import { MAX_FILE_BYTES } from "./store/types.ts";
-import { canEditGitHub, config, guestCreate } from "./config.ts";
+import { config, guestCreate } from "./config.ts";
 import { bearerToken, colorFor, endSession, forgetUser, githubLoginEnabled, participantForUser, repoAccess, sameOrigin, type User } from "./auth.ts";
 import * as ops from "./ops.ts";
 import type { Ctx } from "./ops.ts";
-import { lookupGitHub } from "./github.ts";
 import { getRepo, slugify, type RepoRow } from "./repos.ts";
-import { branchCandidates, parseGitHubRepo, validBranch } from "../shared/github.ts";
 import { errStatus, isErr } from "./errors.ts";
+import { handleImport } from "./import.ts";
 import type { Participant } from "./rooms.ts";
 import { googleLoginEnabled } from "./google.ts";
 import { appTokenInfo, revokeAppToken } from "./tokens.ts";
@@ -45,7 +43,7 @@ function demoPerson(req: Request, user: User | null, visitor?: Participant): str
   return guest && guest.id !== "guest:visitor" ? guest.id : null;
 }
 
-/** Anyone may open and edit any folder; only whoever made it (or added the GitHub copy) may remove it (anyone, with sign-in off: nothing is anyone's). */
+/** Anyone may open and edit any folder; only whoever made it may remove it (anyone, with sign-in off: nothing is anyone's). */
 const canRemove = (user: User | null, r: RepoRow) => !!user && (!config.signIn || (!!r.owner_id && r.owner_id === user.id));
 
 /** The one workspace shape every route returns (GET /api/workspaces, GET /api/workspace/:id, creating one, …). */
@@ -53,10 +51,7 @@ export function workspaceJson(r: RepoRow, user: User | null) {
   return {
     id: r.id,
     title: r.title,
-    kind: r.kind,
-    ghOwner: r.gh_owner,
-    ghName: r.gh_name,
-    branch: r.branch,
+    kind: "notes",
     status: r.status,
     error: r.error,
     readOnly: !!r.read_only,
@@ -124,6 +119,7 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
   const p = url.pathname;
   const m = req.method;
   const db = ctx.repos.db;
+  if (p.startsWith("/api/admin/")) return handleImport(req, p, ctx);
 
   if (p === "/api/server" && m === "GET") {
     return json(
@@ -136,10 +132,11 @@ async function route(req: Request, url: URL, ctx: Ctx, user: User | null, visito
         marketing: config.marketingSite,
         googleLogin: config.signIn && googleLoginEnabled(),
         githubLogin: config.signIn && githubLoginEnabled(),
-        // editable GitHub links (the GitHub App to install); null: GitHub repos are read-only copies
-        githubAppSlug: config.githubCopiesEnabled && canEditGitHub() ? config.github.appSlug : null,
-        // false: adding GitHub repos is turned off (GITHUB_COPIES), so clients don't offer it
-        githubCopies: config.githubCopiesEnabled,
+        // GitHub workspaces are gone (docs/storage-v2.md): older clients read these
+        githubAppSlug: null,
+        githubCopies: false,
+        // notes are kept in SQLite with versions (no Git): `history` items are versions
+        storage: "notes-v2",
         demoResetMinutes: config.demoResetMinutes,
         // WebSocket protocol versions (2: one socket per workspace, docs/07-workspace-socket.md)
         ws: wsProtocols,
@@ -274,21 +271,11 @@ async function noteWrites(req: Request, url: URL, ctx: Ctx, user: User | null, a
       return json({ ok: true });
     }
     if (repo.status !== "ready") throw new HttpError(409, repo.status === "importing" ? `${repo.id} is still importing` : `${repo.id}: ${repo.error ?? repo.status}`);
-    if (sub === "refresh" && m === "POST") {
-      if (repo.kind === "github" && !config.githubCopiesEnabled) throw new HttpError(403, "Refreshing GitHub repos is turned off on this server");
-      try {
-        // Refreshes from GitHub at most every 10 s per repo, however often people click.
-        await ctx.repos.refresh(repo, 10_000);
-      } catch (e) {
-        throw new HttpError(502, `couldn't refresh from GitHub: ${(e as Error).message}`);
-      }
-      return json({ head: await ctx.repos.host.get(repo.id).head(repo) });
-    }
     if (sub === "files" && m === "POST") {
       write();
       create("create notes");
       // a body no note could come from isn't read (JSON escapes a byte in at most 6); the content is checked again
-      if (Number(req.headers.get("content-length")) > 6 * MAX_FILE_BYTES + 64 * 1024) throw new HttpError(413, `notes can be at most ${MAX_FILE_BYTES / 1024 / 1024} MB`);
+      if (Number(req.headers.get("content-length")) > 6 * ops.MAX_NOTE_BYTES + 64 * 1024) throw new HttpError(413, `notes can be at most ${ops.MAX_NOTE_BYTES / 1024 / 1024} MB`);
       const b = await body(req);
       const content = b.content === undefined || b.content === null ? undefined : String(b.content);
       const made = await ops.createFile(ctx, repo, str(b.path, "path"), content, actor);
@@ -349,9 +336,8 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
     case "tree": {
       // Opening a folder adds it to the user's joined list.
       if (user) await recordJoin(ctx.repos.db, user.id, repo.id);
-      // The head from the workspace's runtime, which makes the commits (on Workers the Worker's own cache never hears of them).
+      // (head: a tag of the tree, from the workspace's runtime)
       const [files, head] = await Promise.all([ctx.repos.tree(repo), ctx.repos.host.get(repo.id).head(repo)]);
-      // The tree is the committed files at the head plus the notes not saved yet, so a hash of the body is its version.
       const text = JSON.stringify({ head, files });
       const etag = `"${createHash("sha1").update(text).digest("base64url")}"`;
       // private, no-cache: browsers keep it and revalidate every time (a 304 when nothing changed).
@@ -370,16 +356,22 @@ async function reads(req: Request, url: URL, ctx: Ctx, user: User | null): Promi
       return json({ content: r.content, version: r.version, live: r.live });
     }
     case "raw":
-      // An image from the repo, for notes that show it. Served with its type from the extension, never sniffed;
+      // An image of the workspace, for notes that show it. Served with its type from the extension, never sniffed;
       // SVGs can't run scripts or load anything.
-      return rawResponse(await ops.readRaw(ctx, repo, query(url, "path"), url.searchParams.get("ref") || undefined));
+      return rawResponse(await ops.readRaw(ctx, repo, query(url, "path")));
     case "search":
       return json(await ops.search(ctx, repo, url.searchParams.get("q") ?? ""));
+    case "export": {
+      // every note, image and version as a zip (docs/storage-v2.md §11)
+      const bytes = await ctx.repos.host.get(repo.id).exportZip(repo);
+      const name = `${slugify(repo.title) || repo.id}-${new Date().toISOString().slice(0, 10)}.zip`;
+      return new Response(bytes, { headers: { "content-type": "application/zip", "content-disposition": `attachment; filename="${name}"`, "cache-control": "no-store" } });
+    }
   }
   return null;
 }
 
-const READS = new Set(["tree", "file", "raw", "history", "diff", "search"]);
+const READS = new Set(["tree", "file", "raw", "history", "diff", "search", "export"]);
 
 /** The WebSocket protocol versions this host serves (GET /api/server `ws`): v1 everywhere, 2 where the host wires it. */
 let wsProtocols: number[] = [1];
@@ -487,12 +479,7 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
     if (m === "GET") return json((await listedRows(ctx.repos.db, user.id)).map((r) => workspaceJson(r, user)));
     if (m === "POST") {
       const b = await body(req);
-      if (b.github !== undefined) {
-        // a copy of a GitHub repo (read-only unless asked otherwise), importing in the background
-        const { repo, created } = await addGitHub(ctx, user, b);
-        await recordJoin(ctx.repos.db, user.id, repo.id);
-        return json(workspaceJson(repo, user), created ? 201 : 200);
-      }
+      if (b.github !== undefined) throw new HttpError(410, "GitHub workspaces are gone: Grim keeps notes itself now");
       const made = await createFolder(ctx, user, b);
       metric(ctx.repos.db, "workspace_created", req);
       return json(workspaceJson(made, user), 201);
@@ -530,61 +517,4 @@ async function workspaces(req: Request, url: URL, ctx: Ctx, user: User): Promise
     return json({ joined, missing });
   }
   return fail(404, "not found");
-}
-
-const GITHUB_COPIES_OFF = "Adding GitHub repos is turned off on this server";
-
-/**
- * POST /api/workspaces {github: URL or owner/name, branch?, readOnly?}. Read-only copies of public repos are open to
- * everyone signed in (looked up anonymously: the user's GitHub token is never sent); editable links need access on
- * GitHub. An existing copy is returned as is; one whose import failed is imported again.
- */
-async function addGitHub(ctx: Ctx, user: User, b: Record<string, unknown>): Promise<{ repo: RepoRow; created: boolean }> {
-  if (!config.githubCopiesEnabled) throw new HttpError(403, GITHUB_COPIES_OFF);
-  const ref = typeof b.github === "string" ? parseGitHubRepo(b.github) : null;
-  if (!ref) throw new HttpError(400, "Enter a GitHub repo as owner/name or a github.com URL");
-  if (b.branch !== undefined && b.branch !== null && b.branch !== "" && (typeof b.branch !== "string" || !validBranch(b.branch))) throw new HttpError(400, "invalid branch name");
-  const explicit = typeof b.branch === "string" && b.branch ? b.branch : undefined;
-  // Read-only unless asked otherwise (publicReadOnly is the older name).
-  const wantsEdit = b.readOnly === false || b.publicReadOnly === false;
-  if (wantsEdit && !canEditGitHub()) throw new HttpError(400, "editing GitHub repos needs Code Storage and the GitHub App; add it read-only");
-  const readOnly = !wantsEdit;
-  // Branch candidates from a /tree/ or /blob/ URL, longest first (branch names may contain slashes).
-  const candidates = explicit ? [explicit] : branchCandidates(ref.rest, ref.kind).map((c) => c.branch);
-  if (ref.rest.length && !candidates.length) throw new HttpError(400, "invalid branch name in the URL");
-  const label = `${ref.owner}/${ref.name}`;
-  const existingOr = async (existing: RepoRow) => ({ repo: existing.status === "error" ? await ctx.repos.retryImport(existing, user.id) : existing, created: false });
-
-  // With an explicit branch a known copy can be returned without asking GitHub.
-  if (explicit) {
-    const existing = await ctx.repos.findGitHub(ref.owner, ref.name, { readOnly, branch: explicit });
-    if (existing) return existingOr(existing);
-  }
-  if (!readOnly && !user.githubToken) throw new HttpError(403, "linking a GitHub repo you can edit needs a GitHub sign-in; add it read-only");
-
-  let found;
-  try {
-    found = await lookupGitHub(ref.owner, ref.name, { token: readOnly ? null : user.githubToken, candidates });
-  } catch (e) {
-    if (isErr(e, "GitHubLookupError")) throw new HttpError(e.status as number, e.message);
-    throw e;
-  }
-  if (readOnly) {
-    if (!found) throw new HttpError(404, `${label} wasn't found on GitHub. Check the name; private repos can't be added read-only.`);
-    if (found.private) throw new HttpError(403, `${label} is private. Only public repos can be added read-only.`);
-  } else if (!found || found.access === "none") {
-    throw new HttpError(403, `you don't have access to ${label} on GitHub`);
-  }
-  const owner = found?.owner ?? ref.owner;
-  const name = found?.name ?? ref.name;
-  const branch = found ? found.branch : candidates[0];
-  const existing = await ctx.repos.findGitHub(owner, name, { readOnly, branch });
-  if (existing) return existingOr(existing);
-
-  if (readOnly) {
-    const counts = await ctx.repos.readOnlyCopies(user.id);
-    if (counts.total >= config.githubCopies.max) throw new HttpError(503, `This Grim server already has ${counts.total} GitHub repos, the most it keeps. Ask whoever runs it to remove some.`);
-    if (counts.mine >= config.githubCopies.perUser) throw new HttpError(403, `You've added ${counts.mine} GitHub repos, the most one person can. Remove one first.`);
-  }
-  return ctx.repos.linkGitHub(owner, name, { publicReadOnly: readOnly, userId: user.id, branch, defaultBranch: found?.defaultBranch ?? undefined });
 }

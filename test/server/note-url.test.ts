@@ -1,5 +1,6 @@
 // Content negotiation on note URLs (src/server/note-url.ts): /app/<workspace>/<path> answers the app to browsers and
 // the note's Markdown (live), a folder listing, an image's bytes or a plain 404 to everything else.
+import { GRIM } from "../../src/server/repos.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { isolate, room, seedNotebook, waitFor } from "./helpers.ts";
 
@@ -22,19 +23,11 @@ beforeAll(async () => {
   app = await startServer({ port: 0, quiet: true });
   base = `http://localhost:${app.server.port}`;
   await seedNotebook(app.ctx, WS);
-  const head = await app.ctx.store.head(WS, "main");
-  await app.ctx.store.commit({
-    repo: WS,
-    branch: "main",
-    expectedHead: head,
-    changes: [
-      { path: "shell-background/plan.md", content: "# Plan\n\nStep one.\n" },
-      { path: "shell-background/notes.md", content: "notes\n" },
-      { path: "images/a.png", content: PNG },
-    ],
-    message: "Seed",
-    author: { name: "Test", email: "test@example.com" },
-  });
+  const row = (await app.ctx.repos.get(WS))!;
+  const ws = app.ctx.repos.host.get(WS);
+  await ws.createFile(row, "shell-background/plan.md", "# Plan\n\nStep one.\n", GRIM);
+  await ws.createFile(row, "shell-background/notes.md", "notes\n", GRIM);
+  await ws.uploadImage(row, "a.md", "a.png", PNG, GRIM);
 });
 afterAll(async () => {
   await app?.stop();
@@ -120,7 +113,6 @@ describe("note URLs", () => {
     await waitFor(() => c.text.toString().length > 0);
     c.text.insert(c.text.length, "Typed live.\n");
     await waitFor(async () => (await (await get(`/app/${WS}/shell-background/plan.md`)).text()).endsWith("Typed live.\n"));
-    expect(await app.ctx.store.readFile(WS, "shell-background/plan.md", (await app.ctx.store.head(WS, "main"))!)).toBe("# Plan\n\nStep one.\n");
     c.close();
   });
 });

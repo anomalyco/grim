@@ -46,7 +46,6 @@ export const CH_HIDDEN = 2;
 export interface AdmittedSocket {
   v: 2;
   repoId: string;
-  branch: string;
   status: WorkspaceStatus;
   error?: string;
   participant: Participant;
@@ -71,7 +70,8 @@ export interface ChannelInfo {
 export interface MuxState {
   v: 2;
   u: Participant;
-  b: string;
+  /** (older attachments: the Git branch, unused) */
+  b?: string;
   ro: boolean;
   /** Next channel id (never reused on a socket). */
   n: number;
@@ -183,7 +183,6 @@ export const createWorkspaceSocket: CreateWorkspaceSocket = (host, from) => new 
 class MuxSocket implements WorkspaceSocket {
   readonly user: Participant;
   readonly readOnly: boolean;
-  private readonly branch: string;
   private next = 1;
   private chans = new Map<number, Channel>();
   private byPath = new Map<string, number>();
@@ -202,13 +201,11 @@ class MuxSocket implements WorkspaceSocket {
       const a = from.admission;
       this.user = a.participant;
       this.readOnly = a.readOnly;
-      this.branch = a.branch;
       return;
     }
     const st = from.restore;
     this.user = st.u;
     this.readOnly = st.ro;
-    this.branch = st.b;
     this.next = st.n;
     for (const [ch, path, generation, flags] of st.c) {
       const info: ChannelInfo = { ch, path, generation, readOnly: !!(flags & CH_READ_ONLY), hidden: !!(flags & CH_HIDDEN) };
@@ -316,7 +313,7 @@ class MuxSocket implements WorkspaceSocket {
         if (state && meta) aw.push([ch, id, meta.clock, JSON.stringify(state)]);
       }
     }
-    return { v: 2, u: this.user, b: this.branch, ro: this.readOnly, n: this.next, c, aw };
+    return { v: 2, u: this.user, ro: this.readOnly, n: this.next, c, aw };
   }
 
   reattach(ch: number, room: Room): boolean {

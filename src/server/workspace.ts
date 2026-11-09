@@ -1,35 +1,30 @@
-// One workspace's runtime: its rooms and repo state (tree cache, last seen head, rename queue, refresh), and the file
-// operations shared by the HTTP API, the agent shell and MCP, so people and agents get identical behavior. Bun keeps
-// one per workspace in a Map (bun/workspace-host-local.ts); on Workers a WorkspaceDO hosts one. Methods take and
-// return plain data and throw errors matched by name (see seams/workspace-host.ts).
+// One workspace's runtime: its rooms and its NoteStore (notes/store.ts), and the operations shared by the HTTP API,
+// the note shell and MCP, so people and agents get identical behavior. Bun keeps one per workspace in a Map
+// (bun/workspace-host-local.ts); on Workers a WorkspaceDO hosts one. Methods take and return plain data and throw
+// errors matched by name (see seams/workspace-host.ts).
 import type * as Y from "yjs";
-import { emit, notifyChange, waitForChange } from "./events.ts";
+import { createHash } from "node:crypto";
+import { emit, notifyChange } from "./events.ts";
 import { isErr } from "./errors.ts";
 import { isUntitledPath } from "../shared/untitled.ts";
-import { authorOf, type Participant, type PinnedWrite, type Room } from "./room.ts";
+import { personOf, type Participant, type Room } from "./room.ts";
 import type { RoomManager } from "./rooms.ts";
 import type { RepoRow } from "./repos.ts";
-import { dirPath, encodeLinkPath, escapeAlt, imagePath, IMAGE_TYPES, MAX_RAW_BYTES, MAX_UPLOAD_BYTES, OpError, path, SAFE_REF, sniffImage, uploadName, version, writable } from "./ops.ts";
-import { isMarkdown, MAX_FILE_BYTES, type FileMeta, type GitStore } from "./store/types.ts";
-import { demoLimits, isDemoRoom } from "./demo.ts";
-import { newId } from "./ids.ts";
+import { dirPath, encodeLinkPath, escapeAlt, imagePath, IMAGE_TYPES, MAX_NOTE_BYTES, MAX_UPLOAD_BYTES, OpError, path, sniffImage, uploadName, version, writable } from "./ops.ts";
+import { DEMO_FULL, demoLimits, isDemoRoom } from "./demo.ts";
 import { applyToYText, diffText, rebaseSplices } from "./textdiff.ts";
-import { unified } from "./store/unified.ts";
-import { AGENT_EMAIL, CHANGES_HISTORY, diffPaths, fileDiff, MAX_CHANGES_BYTES, type ChangedFile, type ChangesResult } from "./changes.ts";
+import { unified } from "./notes/unified.ts";
+import { authorsFromVersions, parseVersionRef, versionRef, type NoteStore, type Person, type Version } from "./notes/store.ts";
+import { runNoteCommand, type NoteShellResult } from "./notes/shell.ts";
+import { zip } from "./notes/zip.ts";
 import type { AppEvent } from "./seams/events.ts";
+import type { BlobStore } from "./seams/blobs.ts";
 import { CLOSE, CODE, createWorkspaceSocket, WorkspaceSocketSet, type AdmittedSocket, type OpenErrorCode, type OpenRoomResult, type WorkspaceSocket } from "./wsmux.ts";
-import type { AdmittedWorkspace, DirtyNote, PresenceUser, SaveResult, ShellSnapshot, ShellWrite, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
+import type { AdmittedWorkspace, ImportNote, NoteCommand, PresenceUser, VersionSummary, WorkspaceApi, WorkspaceHost, WsDecision } from "./seams/workspace-host.ts";
+const GUEST_EMAIL = "guest@grimoire.invalid";
 
-/**
- * The store as the runtime uses it: a CachedHeadStore (index.ts) also takes `{ fresh: true }` (pollers) and
- * `invalidate(repo)` (webhooks); any other GitStore ignores both.
- */
-export type HeadCachingStore = GitStore & {
-  head(repo: string, branch: string, opts?: { fresh?: boolean }): Promise<string | null>;
-  invalidate?(repo: string): void;
-};
-
-type Change = { path: string; content?: string | Uint8Array; delete?: boolean };
+/** Calls per minute and commands at a time, per agent caller and workspace (tests lower them). */
+export const agentLimits = { perMinute: 120, concurrent: 4 };
 
 /** Replace the whole text with `next` as a minimal edit; returns the index after the last change. */
 function replaceMinimal(text: Y.Text, next: string): number {
@@ -44,7 +39,6 @@ function utf8Bytes(s: string): number {
     if (c < 0x80) continue;
     if (c < 0x800) n += 1;
     else if (c >= 0xd800 && c < 0xdc00 && i + 1 < s.length) {
-      // a surrogate pair: 2 UTF-16 units, 4 bytes
       n += 2;
       i++;
     } else n += 2;
@@ -52,100 +46,82 @@ function utf8Bytes(s: string): number {
   return n;
 }
 
-/**
- * Refuse (413) an edit that leaves note `p` at `bytes` (UTF-8), over what the store commits (MAX_FILE_BYTES, the
- * demo's note budget): such a note could never be saved. One that shrinks an oversized note (`before`) is allowed.
- */
+/** Refuse (413) an edit that leaves note `p` larger than notes may be; one that shrinks an oversized note is allowed. */
 function checkNoteSize(repo: RepoRow, p: string, bytes: number, before = 0) {
-  const max = isDemoRoom(repo.id) ? demoLimits.noteBytes : MAX_FILE_BYTES;
+  const max = isDemoRoom(repo.id) ? demoLimits.noteBytes : MAX_NOTE_BYTES;
   if (bytes > max && bytes > before) throw new OpError(413, `${p} would be too large: notes can be at most ${max / 1024 / 1024} MB`);
 }
 
 /** Whether `p` is folder `dir` or inside it ("" is the whole workspace). */
 const under = (dir: string, p: string) => !dir || p === dir || p.startsWith(dir + "/");
 
-const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
-
-/** Committed note text by workspace, commit and path, for shell snapshots. Text at a commit never changes, so it's shared. */
-const headTexts = new Map<string, string>();
-let headTextBytes = 0;
-const MAX_HEAD_TEXT_BYTES = 32 * 1024 * 1024;
-/** Most committed text one snapshot carries (the rest is read with a later `want`). */
-const SNAPSHOT_BYTES = 8 * 1024 * 1024;
-/** Files read from the store at once while filling a snapshot. */
-const SNAPSHOT_READS = 16;
-
-function cacheHeadText(k: string, text: string) {
-  if (headTexts.has(k)) return;
-  headTexts.set(k, text);
-  headTextBytes += text.length;
-  for (const [old, v] of headTexts) {
-    if (headTextBytes <= MAX_HEAD_TEXT_BYTES) break;
-    headTexts.delete(old);
-    headTextBytes -= v.length;
-  }
+/** How a person signs a version (the history API's author fields). */
+function signature(p: Person | undefined): { name: string; email: string } {
+  if (!p) return { name: "Grim", email: "grim@grimnotes.app" };
+  return { name: p.kind === "guest" ? `${p.name} (guest)` : p.name, email: p.email };
 }
 
-/** WebSocket admission, file level: open the note's room (4404 missing, 4413 too large, 1013 transient, 1011 other). */
+const VERB: Record<string, string> = { edit: "Update", agent: "Update", restore: "Restore", rename: "Rename", delete: "Delete", import: "Update" };
+
+export function summary(v: Version): VersionSummary {
+  const main = signature(v.authors[0]);
+  const co = v.authors.slice(1).map((a) => {
+    const s = signature(a);
+    return `Co-authored-by: ${s.name} <${s.email}>`;
+  });
+  const message = (v.message ?? `${VERB[v.kind] ?? "Update"} ${v.path}`) + (co.length ? `\n\n${co.join("\n")}` : "");
+  return { sha: versionRef(v.id), message, authorName: main.name, authorEmail: main.email, date: new Date(v.ended_at).toISOString(), kind: v.kind, path: v.path };
+}
+
+/** A person from a Git-style author (imports). */
+export function importedPerson(name: string, email: string): Person {
+  const kind = email === GUEST_EMAIL ? "guest" : email.endsWith("@agents.grimoire") ? "agent" : "human";
+  const shown = kind === "guest" ? name.replace(/ \(guest\)$/, "") : name;
+  const id = kind === "human" ? `email:${email.toLowerCase()}` : `${kind}-name:${shown}`;
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619);
+  const colors = ["#e06c75", "#61afef", "#98c379", "#c678dd", "#d19a66", "#56b6c2", "#e5c07b", "#be5046"];
+  return { id, name: shown || email, email, kind, color: colors[(h >>> 0) % colors.length]! };
+}
+
+/** WebSocket admission, file level: open the note's room (4404 missing, 1011 other). */
 export async function admitFile(rooms: RoomManager, a: AdmittedWorkspace): Promise<WsDecision> {
   try {
-    const room = await rooms.get(a.repoId, a.path, a.branch);
+    const room = await rooms.get(a.repoId, a.path);
     return { room, participant: a.participant, readOnly: a.readOnly };
   } catch (e) {
     if (isErr(e, "NotFoundError")) return { reject: { code: 4404, reason: "file not found" } };
-    if (isErr(e, "FileTooLargeError")) return { reject: { code: 4413, reason: "file too large" } };
-    // Transient (e.g. GitHub unreachable): the client retries.
-    if (isErr(e, "StoreUnavailableError")) return { reject: { code: 1013, reason: "try again later" } };
     console.error(`[ws] open ${a.repoId}:${a.path}:`, e);
     return { reject: { code: 1011, reason: "could not open file" } };
   }
 }
 
 export class WorkspaceRuntime implements WorkspaceApi {
-  /** Committed Markdown files at the last head listed. */
-  private treeCache: { head: string | null; files: string[] } | null = null;
-  /** Branch tip last seen by onPush (undefined: none yet). */
-  private lastHead: string | null | undefined = undefined;
   /** Renames (notes and folders) run one at a time. */
   private renaming: Promise<unknown> | null = null;
-  private refreshing: Promise<void> | null = null;
-  private lastRefresh = 0;
-  /** Shell snapshots: this runtime's instance (versions from another one get a full snapshot), and open notes' text by change number. */
-  private readonly snapEpoch = newId();
-  private liveSeq = 0;
-  /** Change numbers below this were forgotten (closed notes pruned): older versions get a full snapshot. */
-  private liveFloor = 0;
-  private liveSeen = new Map<string, { seq: number; text: string | null }>();
-  private headListing: { head: string; files: Promise<{ head: string; files: FileMeta[]; date: string | null }> } | null = null;
   /** Protocol v2 sockets of this workspace (Bun: attachSocket) and their events. */
   readonly sockets = new WorkspaceSocketSet({ room: (p) => this.rooms.peek(this.id, p), rooms: () => this.rooms.inRepo(this.id) });
-  /** The branch the sockets were admitted on (for `tree` heads). */
-  private socketBranch: string | null = null;
+  private calls = new Map<string, { start: number; n: number }>();
+  private running = new Map<string, number>();
 
   constructor(
     readonly id: string,
-    private store: HeadCachingStore,
-    /** The rooms; only this workspace's are touched (Bun shares one RoomManager between runtimes, keyed by repo). */
     readonly rooms: RoomManager,
+    private blobs: BlobStore,
   ) {}
+
+  get store(): NoteStore {
+    return this.rooms.store(this.id);
+  }
 
   private check(repo: RepoRow) {
     if (repo.id !== this.id) throw new Error(`workspace ${this.id} got a call for ${repo.id}`);
   }
 
-  private async room(repo: RepoRow, p: string) {
-    try {
-      return await this.rooms.get(repo.id, p, repo.branch);
-    } catch (e) {
-      if (isErr(e, "NotFoundError")) throw new OpError(404, `${p} not found in ${repo.id}`);
-      throw e;
-    }
-  }
-
-  private async exists(repo: RepoRow, p: string) {
-    if (this.rooms.peek(repo.id, p)) return true;
-    const head = await this.store.head(repo.id, repo.branch);
-    return head !== null && (await this.store.readFile(repo.id, p, head)) !== null;
+  private room(p: string): Room {
+    const r = this.rooms.getSync(this.id, p);
+    if (!r) throw new OpError(404, `${p} not found in ${this.id}`);
+    return r;
   }
 
   admitFile(a: AdmittedWorkspace): Promise<WsDecision> {
@@ -153,14 +129,9 @@ export class WorkspaceRuntime implements WorkspaceApi {
     return admitFile(this.rooms, a);
   }
 
-  /**
-   * A protocol v2 socket of this workspace (in-process hosts): sends `welcome` and the presence snapshot through
-   * `transport`. The host passes it the socket's frames (onMessage) and calls detachSocket when it closes.
-   */
+  /** A protocol v2 socket of this workspace (in-process hosts). */
   attachSocket(a: AdmittedSocket, transport: { send(data: Uint8Array | string): void; close(code: number, reason?: string): void }): WorkspaceSocket {
     if (a.repoId !== this.id) throw new Error(`workspace ${this.id} got a socket for ${a.repoId}`);
-    this.socketBranch = a.branch;
-    // the admission read the row just now: the newest status there is
     this.sockets.status = a.status;
     this.sockets.error = a.error;
     const sock = createWorkspaceSocket(
@@ -185,16 +156,14 @@ export class WorkspaceRuntime implements WorkspaceApi {
     sock.closed();
   }
 
-  /** Close every v2 socket (shutdown: 1012, clients reconnect). */
   closeSockets(code: number, reason: string) {
     for (const s of this.sockets.all()) s.closeSocket(code, reason);
   }
 
-  /** A v2 channel's room: admitFile's logic, and 1013 while the workspace isn't ready. */
   private async openNote(a: AdmittedSocket, p: string): Promise<OpenRoomResult> {
     const status = this.sockets.status;
     if (status !== "ready") return { reject: { code: CODE.retry, reason: `workspace ${status}` } };
-    const d = await admitFile(this.rooms, { repoId: a.repoId, branch: a.branch, path: p, participant: a.participant, readOnly: a.readOnly });
+    const d = await admitFile(this.rooms, { repoId: a.repoId, path: p, participant: a.participant, readOnly: a.readOnly });
     return "reject" in d ? { reject: { code: d.reject.code as OpenErrorCode, reason: d.reject.reason } } : { room: d.room };
   }
 
@@ -208,131 +177,134 @@ export class WorkspaceRuntime implements WorkspaceApi {
         return this.sockets.broadcast({ t: "saved", path: e.path, sha: e.sha });
       case "workspace":
         return this.sockets.broadcast({ t: "workspace", status: e.status, ...(e.error ? { error: e.error } : {}) });
-      case "tree": {
-        const head = this.socketBranch ? await this.store.head(this.id, this.socketBranch).catch(() => null) : null;
-        return this.sockets.broadcast({ t: "tree", head: head ?? "" });
-      }
+      case "tree":
+        return this.sockets.broadcast({ t: "tree", head: this.treeTag() });
     }
   }
+
+  private treeTag(): string {
+    return createHash("sha1").update(this.store.paths().join("\n")).digest("hex").slice(0, 16);
+  }
+
+  // ---- reading ----
 
   async readFile(repo: RepoRow, p: string, ref?: string) {
     this.check(repo);
     p = path(p);
-    if (ref && !SAFE_REF.test(ref)) throw new OpError(400, `invalid ref: ${ref}`);
-    if (!ref) {
-      const open = this.rooms.peek(repo.id, p);
-      if (open) return { path: p, content: open.text.toString(), version: version(open.text.toString()), live: true };
-      ref = (await this.store.head(repo.id, repo.branch)) ?? undefined;
+    if (ref) {
+      const v = this.versionOf(p, ref);
+      return { path: p, content: v.text, version: version(v.text), live: false };
     }
-    const content = ref ? await this.store.readFile(repo.id, p, ref) : null;
-    if (content === null) throw new OpError(404, `${p} not found`);
-    return { path: p, content, version: version(content), live: false };
+    const open = this.rooms.peek(this.id, p);
+    const text = open ? open.text.toString() : this.store.byPath(p)?.text;
+    if (text === undefined) throw new OpError(404, `${p} not found`);
+    return { path: p, content: text, version: version(text), live: true };
   }
 
-  /** An image file's bytes at `ref` (default: the branch tip). Images aren't edited live, so there's no room text. */
-  async readRaw(repo: RepoRow, p: string, ref?: string) {
-    this.check(repo);
-    const { path, type } = imagePath(p);
-    if (ref && !SAFE_REF.test(ref)) throw new OpError(400, `invalid ref: ${ref}`);
-    ref ??= (await this.store.head(repo.id, repo.branch)) ?? undefined;
-    const bytes = ref ? await this.store.readBlob(repo.id, path, ref, MAX_RAW_BYTES) : null;
-    if (bytes === null) throw new OpError(404, `${path} not found`);
-    return { path, type, bytes };
+  /** Version `ref` of the note at `p` (a live note, or the newest deleted one with that path). */
+  private versionOf(p: string, ref: string): Version {
+    const id = parseVersionRef(ref);
+    const v = id === null ? null : this.store.version(id);
+    const note = this.store.anyByPath(p);
+    if (!v || (note && v.note_id !== note.id && v.path !== p) || (!note && v.path !== p)) throw new OpError(404, `${p} not found at ${ref}`);
+    return v;
   }
 
-  /**
-   * Store an uploaded image in `images/` next to note `notePath`, committed at once by `actor` ("Add <path>"). The
-   * name is kept; another file with that name gets `name-2.png`, `name-3.png`…; an identical file already there is
-   * reused (nothing committed). Returns the repo path and the Markdown that shows it in the note.
-   */
-  async uploadImage(repo: RepoRow, notePath: string, filename: string, bytes: Uint8Array, actor: Participant) {
+  async readRaw(repo: RepoRow, p: string) {
     this.check(repo);
-    writable(repo);
-    const note = path(notePath);
-    if (!bytes.length) throw new OpError(400, "the file is empty");
-    if (bytes.length > MAX_UPLOAD_BYTES) throw new OpError(413, `images can be at most ${MAX_UPLOAD_BYTES / 1024 / 1024} MB`);
-    const sniffed = sniffImage(bytes);
-    if (!sniffed) throw new OpError(415, `not an image (${Object.keys(IMAGE_TYPES).join(", ")})`);
-    const { name, stem, ext } = uploadName(filename, sniffed);
-    const dir = [...note.split("/").slice(0, -1), "images"].join("/");
-    const candidate = (n: number) => imagePath(`${dir}/${n === 1 ? name : `${stem}-${n}.${ext}`}`).path;
-    const result = (p: string, reused: boolean) => {
-      const markdownPath = encodeLinkPath(p.slice(dir.length - "images".length));
-      return { path: p, markdownPath, markdown: `![${escapeAlt(stem)}](${markdownPath})`, reused };
-    };
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const head = await this.store.head(repo.id, repo.branch);
-      let target: string | null = null;
-      for (let n = 1; n <= 1000 && !target; n++) {
-        const cand = candidate(n);
-        let existing: Uint8Array | null | "other" = null;
-        if (head) {
-          try {
-            existing = await this.store.readBlob(repo.id, cand, head, MAX_UPLOAD_BYTES);
-          } catch (e) {
-            if (!isErr(e, "FileTooLargeError")) throw e;
-            existing = "other";
-          }
-        }
-        if (existing === null) target = cand;
-        else if (existing !== "other" && sameBytes(existing, bytes)) return result(cand, true);
-      }
-      if (!target) throw new OpError(409, `too many images named ${name}`);
-      const res = await this.store.writeBlob({ repo: repo.id, branch: repo.branch, expectedHead: head, path: target, bytes, message: `Add ${target}`, author: authorOf(actor) });
-      if (res.ok) {
-        await this.onPush(repo);
-        return result(target, false);
-      }
-    }
-    throw new OpError(409, "could not commit: the branch keeps moving");
+    const { path: ip, type } = imagePath(p);
+    const img = this.store.image(ip);
+    const bytes = img ? await this.blobs.get(`${this.id}/${img.sha256}`) : null;
+    if (!img || !bytes) throw new OpError(404, `${ip} not found`);
+    return { path: ip, type, bytes, sha256: img.sha256 };
   }
+
+  async tree(repo: RepoRow): Promise<string[]> {
+    this.check(repo);
+    return this.store.paths();
+  }
+
+  async head(repo: RepoRow) {
+    this.check(repo);
+    return this.treeTag();
+  }
+
+  async history(repo: RepoRow, p: string | undefined, limit = 50): Promise<VersionSummary[]> {
+    this.check(repo);
+    limit = Math.min(Math.max(limit, 1), 200);
+    if (!p) return this.store.versionsUnder("", limit).map(summary);
+    const note = this.store.anyByPath(path(p));
+    if (note) return this.store.versions(note.id, limit).map(summary);
+    return this.store.versionsUnder(dirPath(p), limit).map(summary);
+  }
+
+  async diff(repo: RepoRow, sha: string, p?: string) {
+    this.check(repo);
+    const id = parseVersionRef(sha);
+    const v = id === null ? null : this.store.version(id);
+    if (!v) throw new OpError(404, `version ${sha} not found`);
+    if (p && !under(dirPath(p), v.path) && v.path !== path(p) && this.store.anyByPath(path(p))?.id !== v.note_id) return "";
+    if (v.kind === "delete") return unified(v.path, v.text, null);
+    const prev = this.store.previous(v);
+    return unified(v.path, prev ? prev.text : null, v.text);
+  }
+
+  async search(repo: RepoRow, q: string) {
+    this.check(repo);
+    return { hits: this.store.search(q, 100) };
+  }
+
+  async who(repo: RepoRow, p: string): Promise<PresenceUser[]> {
+    this.check(repo);
+    return this.sockets.presence(path(p));
+  }
+
+  // ---- writing ----
 
   async createFile(repo: RepoRow, p: string, content: string | undefined, actor: Participant) {
     this.check(repo);
     writable(repo);
     p = path(p);
-    if (content !== undefined) checkNoteSize(repo, p, utf8Bytes(content));
-    if (await this.exists(repo, p)) throw new OpError(409, `${p} already exists`);
     const base = p.split("/").pop()!.replace(/\.(md|markdown|mdx)$/i, "");
-    const r = await this.rooms.get(repo.id, p, repo.branch, "");
-    const initial = content ?? `# ${base}\n`;
-    r.agentEdit(actor, (t) => {
-      // An empty file still needs an edit, so it is attributed to the actor and wakes watchers.
-      t.insert(0, initial || " ");
-      if (!initial) t.delete(0, 1);
-      return t.length;
-    });
-    // Like any edit, the new file is in the crash log now and gets committed after the quiet period.
+    const text = content ?? `# ${base}\n`;
+    checkNoteSize(repo, p, utf8Bytes(text));
+    if (this.store.byPath(p)) throw new OpError(409, `${p} already exists`);
+    const now = Date.now();
+    const me = personOf(actor);
+    this.store.create(p, text, { authors: { people: [me], lines: text.split("\n").map(() => 0) }, pending: { started: now, last: now, authors: [{ ...me, edits: 1 }] } });
     emit({ type: "tree", repo: repo.id });
-    return { path: p, version: version(r.text.toString()) };
+    notifyChange(repo.id, p);
+    return { path: p, version: version(text) };
   }
 
   /**
    * Apply the change `base` → `next` to the live text, keeping edits that others made since `base` was read.
-   * Fails (409) if both touched the same or adjacent places. Used by the agent shell, which reads, computes and writes later.
+   * Fails (409) if both touched the same or adjacent places.
    */
   async patchFile(repo: RepoRow, p: string, base: string, next: string, actor: Participant) {
     this.check(repo);
     writable(repo);
     p = path(p);
-    const r = await this.room(repo, p);
-    const cur = r.text.toString();
-    const theirs = cur === base ? [] : diffText(base, cur);
-    const ours = rebaseSplices(theirs, diffText(base, next));
-    if (!ours) throw new OpError(409, `${p} was changed by someone else at the same place since you read it; read it again and redo the edit`);
-    // the rebased splices insert and delete what base → next does, so the text grows by exactly as much
-    const now = utf8Bytes(cur);
-    checkNoteSize(repo, p, now + utf8Bytes(next) - utf8Bytes(base), now);
-    r.agentEdit(actor, (t) => applyToYText(t, ours));
+    const r = this.room(p);
+    this.patchRoom(repo, r, base, next, actor);
     return { path: p, version: version(r.text.toString()) };
   }
 
-  /** Append text to the end of the live text, exactly as given (like a shell's `>>`). */
+  private patchRoom(repo: RepoRow, r: Room, base: string, next: string, actor: Participant) {
+    const cur = r.text.toString();
+    const theirs = cur === base ? [] : diffText(base, cur);
+    const ours = rebaseSplices(theirs, diffText(base, next));
+    if (!ours) throw new OpError(409, `${r.path} was changed by someone else at the same place since you read it; read it again and redo the edit`);
+    const now = utf8Bytes(cur);
+    checkNoteSize(repo, r.path, now + utf8Bytes(next) - utf8Bytes(base), now);
+    r.agentEdit(actor, (t) => applyToYText(t, ours));
+  }
+
   async appendText(repo: RepoRow, p: string, text: string, actor: Participant) {
     this.check(repo);
     writable(repo);
     p = path(p);
-    const r = await this.room(repo, p);
+    const r = this.room(p);
     const now = utf8Bytes(r.text.toString());
     checkNoteSize(repo, p, now + utf8Bytes(text), now);
     r.agentEdit(actor, (t) => {
@@ -346,43 +318,38 @@ export class WorkspaceRuntime implements WorkspaceApi {
     this.check(repo);
     writable(repo);
     p = path(p);
-    const old = await this.store.readFile(repo.id, p, sha);
-    if (old === null) throw new OpError(404, `${p} not found at ${sha}`);
-    const r = await this.room(repo, p);
+    const old = this.versionOf(p, sha).text;
+    const r = this.room(p);
+    r.cut("edit");
     r.agentEdit(actor, (t) => replaceMinimal(t, old));
+    r.cut("restore", { force: true, by: actor, message: `Restore ${p} to ${sha}` });
     return { path: p };
-  }
-
-  private async commitTreeChange(repo: RepoRow, changes: Change[], message: string, actor: Participant) {
-    for (let i = 0; i < 5; i++) {
-      const head = await this.store.head(repo.id, repo.branch);
-      const res = await this.store.commit({ repo: repo.id, branch: repo.branch, expectedHead: head, changes, message, author: authorOf(actor) });
-      if (res.ok) return res.sha;
-    }
-    throw new OpError(409, "could not commit: the branch keeps moving");
   }
 
   async deleteFile(repo: RepoRow, p: string, actor: Participant): Promise<{ ok: true }> {
     this.check(repo);
     writable(repo);
     p = path(p);
-    const open = this.rooms.peek(repo.id, p);
-    const head = await this.store.head(repo.id, repo.branch);
-    if (!head || (await this.store.readFile(repo.id, p, head)) === null) {
-      if (!open) throw new OpError(404, `${p} not found`);
-      open.closeWith("deleted");
-      notifyChange(repo.id, p);
-      emit({ type: "tree", repo: repo.id });
-      return { ok: true };
-    }
-    // Commit first: closing the room drops its unsaved edits, so only do it once the delete is in Git.
-    await this.commitTreeChange(repo, [{ path: p, delete: true }], `Delete ${p}`, actor);
-    open?.closeWith("deleted");
-    await this.onPush(repo);
+    this.deleteNote(p, actor);
+    emit({ type: "tree", repo: repo.id });
     return { ok: true };
   }
 
-  /** Run `fn` in the rename queue: renames in a workspace run one at a time, each after the previous one settled. */
+  /** A note goes: its open version is cut, then a delete version; the row is kept (deleted) with its history. */
+  private deleteNote(p: string, actor: Participant) {
+    const open = this.rooms.peek(this.id, p);
+    if (open) {
+      open.cut("edit");
+      open.closeWith("deleted");
+    }
+    const note = this.store.byPath(p);
+    if (!note) throw new OpError(404, `${p} not found`);
+    if (note.pending) this.store.cutVersion(note.id, { kind: "edit", path: p, text: note.text, started: note.pending.started, ended: note.pending.last, authors: note.pending.authors, lines: note.authors });
+    this.store.cutVersion(note.id, { kind: "delete", path: p, text: note.text, started: Date.now(), authors: [{ ...personOf(actor), edits: 1 }], lines: note.authors, message: `Delete ${p}` });
+    this.store.softDelete(note.id);
+    notifyChange(this.id, p);
+  }
+
   private queued<T>(fn: () => Promise<T>): Promise<T> {
     const next = (this.renaming ?? Promise.resolve()).then(fn, fn);
     const tail = next.catch(() => {});
@@ -391,460 +358,274 @@ export class WorkspaceRuntime implements WorkspaceApi {
     return next;
   }
 
-  /**
-   * Rename a note (one commit). `ifUntitled` (a new note named after its heading): only while the note is still
-   * untitled, so when two people trigger it at once the second one is refused (409/404).
-   */
   renameFile(repo: RepoRow, from: string, to: string, actor: Participant, opts: { ifUntitled?: boolean } = {}) {
     this.check(repo);
-    return this.queued(() => this.renameNow(repo, from, to, actor, opts));
+    return this.queued(async () => {
+      writable(repo);
+      from = path(from);
+      to = path(to);
+      if (opts.ifUntitled && !isUntitledPath(from)) throw new OpError(409, `${from} isn't untitled`);
+      if (from === to) return { path: to };
+      if (this.store.byPath(to)) throw new OpError(409, `${to} already exists`);
+      if (!this.store.byPath(from)) throw new OpError(404, `${from} not found`);
+      this.moveNote(from, to, actor);
+      emit({ type: "tree", repo: repo.id });
+      return { path: to };
+    });
   }
 
-  private async renameNow(repo: RepoRow, from: string, to: string, actor: Participant, opts: { ifUntitled?: boolean }) {
-    writable(repo);
-    from = path(from);
-    to = path(to);
-    if (opts.ifUntitled && !isUntitledPath(from)) throw new OpError(409, `${from} isn't untitled`);
-    if (from === to) return { path: to };
-    if (await this.exists(repo, to)) throw new OpError(409, `${to} already exists`);
-    const open = this.rooms.peek(repo.id, from);
-    // Commit pending edits first, so they are attributed to their authors rather than to the rename.
-    if (open?.dirty) await open.flush();
-    const head = await this.store.head(repo.id, repo.branch);
-    const atHead = head ? await this.store.readFile(repo.id, from, head) : null;
-    const content = open && !open.closed ? open.text.toString() : atHead;
-    if (content === null) throw new OpError(404, `${from} not found`);
-    const changes = [...(atHead !== null ? [{ path: from, delete: true }] : []), { path: to, content }];
-    await this.commitTreeChange(repo, changes, `Rename ${from} to ${to}`, actor);
+  /** Move one note: its room closes ("renamed", clients reopen the new path: same note, same epoch, same document). */
+  private moveNote(from: string, to: string, actor: Participant) {
+    const open = this.rooms.peek(this.id, from);
+    if (open) open.cut("edit");
+    const note = this.store.byPath(from)!;
+    // closed first (it compacts), renamed before anyone can reopen it
     open?.closeWith("renamed", { to });
-    await this.onPush(repo);
-    return { path: to };
+    this.store.rename(note.id, to);
+    const now = this.store.byId(note.id)!;
+    if (now.pending) this.store.cutVersion(note.id, { kind: "edit", path: from, text: now.text, started: now.pending.started, ended: now.pending.last, authors: now.pending.authors, lines: now.authors });
+    this.store.cutVersion(note.id, { kind: "rename", path: to, text: now.text, started: Date.now(), authors: [{ ...personOf(actor), edits: 1 }], lines: now.authors, message: `Rename ${from} to ${to}` });
+    notifyChange(this.id, from);
+    notifyChange(this.id, to);
   }
 
-  /** Everything under folder `dir` (committed files, and notes that only exist in open rooms so far). */
-  private async filesUnder(repo: RepoRow, dir: string) {
-    const prefix = `${dir}/`;
-    const head = await this.store.head(repo.id, repo.branch);
-    const committed = head ? (await this.store.listFiles(repo.id, head)).filter((f) => f.startsWith(prefix)) : [];
-    const pending = this.rooms.inRepo(repo.id).map((r) => r.path).filter((f) => f.startsWith(prefix) && !committed.includes(f));
-    return { head, committed, all: [...committed, ...pending] };
-  }
-
-  /** Rename folder `from` to `to`: every file under it moves, in one commit. Runs in the rename queue. */
   renameFolder(repo: RepoRow, from: string, to: string, actor: Participant) {
     this.check(repo);
-    return this.queued(() => this.renameFolderNow(repo, from, to, actor));
+    return this.queued(async () => {
+      writable(repo);
+      from = dirPath(from);
+      to = dirPath(to);
+      if (from === to) return { path: to };
+      if (to.startsWith(`${from}/`)) throw new OpError(400, `can't move ${from} into itself`);
+      const paths = this.store.paths();
+      if (paths.some((f) => f.startsWith(`${to}/`))) throw new OpError(409, `${to} already exists`);
+      const moving = paths.filter((f) => f.startsWith(`${from}/`));
+      const images = this.store.imagesUnder(from);
+      if (!moving.length && !images.length) throw new OpError(404, `${from} not found`);
+      for (const f of moving) this.moveNote(f, to + f.slice(from.length), actor);
+      for (const i of images) this.store.moveImage(i.path, to + i.path.slice(from.length));
+      emit({ type: "tree", repo: repo.id });
+      return { path: to };
+    });
   }
 
-  private async renameFolderNow(repo: RepoRow, from: string, to: string, actor: Participant) {
-    writable(repo);
-    from = dirPath(from);
-    to = dirPath(to);
-    if (from === to) return { path: to };
-    if (to.startsWith(`${from}/`)) throw new OpError(400, `can't move ${from} into itself`);
-    if ((await this.filesUnder(repo, to)).all.length) throw new OpError(409, `${to} already exists`);
-    const { all } = await this.filesUnder(repo, from);
-    if (!all.length) throw new OpError(404, `${from} not found`);
-    const rooms = all.map((f) => this.rooms.peek(repo.id, f));
-    // Commit pending edits first, so they are attributed to their authors rather than to the rename.
-    for (const r of rooms) if (r?.dirty) await r.flush();
-    const head = await this.store.head(repo.id, repo.branch);
-    const changes: Change[] = [];
-    const moved: Array<{ room: (typeof rooms)[number]; to: string }> = [];
-    for (const [i, f] of all.entries()) {
-      const room = rooms[i];
-      const dest = to + f.slice(from.length);
-      const atHead = head ? await this.store.readBlob(repo.id, f, head, MAX_UPLOAD_BYTES) : null;
-      const content = room && !room.closed ? room.text.toString() : atHead;
-      if (content === null) continue;
-      if (atHead !== null) changes.push({ path: f, delete: true });
-      changes.push({ path: dest, content });
-      moved.push({ room, to: dest });
-    }
-    if (!changes.length) throw new OpError(404, `${from} not found`);
-    await this.commitTreeChange(repo, changes, `Rename ${from} to ${to}`, actor);
-    for (const m of moved) m.room?.closeWith("renamed", { to: m.to });
-    await this.onPush(repo);
-    emit({ type: "tree", repo: repo.id });
-    return { path: to };
-  }
-
-  /** Delete folder `dir` and everything under it, in one commit. */
   async deleteFolder(repo: RepoRow, dir: string, actor: Participant): Promise<{ ok: true }> {
     this.check(repo);
     writable(repo);
     dir = dirPath(dir);
-    // Let the notes' own commits (pending or in flight) land first, so none of them brings a file back afterwards.
-    await Promise.allSettled(this.rooms.inRepo(repo.id).filter((r) => r.path.startsWith(`${dir}/`)).map((r) => r.flush()));
-    const { committed, all } = await this.filesUnder(repo, dir);
-    if (!all.length) throw new OpError(404, `${dir} not found`);
-    if (committed.length) await this.commitTreeChange(repo, committed.map((f) => ({ path: f, delete: true })), `Delete ${dir}`, actor);
-    for (const f of all) {
-      this.rooms.peek(repo.id, f)?.closeWith("deleted");
-      if (!committed.includes(f)) notifyChange(repo.id, f);
-    }
-    await this.onPush(repo);
+    const notes = this.store.paths().filter((f) => f.startsWith(`${dir}/`));
+    const images = this.store.imagesUnder(dir);
+    if (!notes.length && !images.length) throw new OpError(404, `${dir} not found`);
+    for (const f of notes) this.deleteNote(f, actor);
+    for (const i of images) this.store.deleteImage(i.path);
     emit({ type: "tree", repo: repo.id });
     return { ok: true };
   }
 
-  async tree(repo: RepoRow): Promise<string[]> {
-    this.check(repo);
-    const head = await this.store.head(repo.id, repo.branch);
-    let committed = this.treeCache?.head === head ? this.treeCache.files : null;
-    if (!committed) {
-      committed = head ? (await this.store.listFiles(repo.id, head)).filter(isMarkdown).sort() : [];
-      this.treeCache = { head, files: committed };
-    }
-    const pending = this.rooms.inRepo(repo.id).filter((r) => !r.inBase).map((r) => r.path);
-    return pending.length ? [...new Set([...committed, ...pending])].sort() : committed;
-  }
-
-  head(repo: RepoRow) {
-    this.check(repo);
-    return this.store.head(repo.id, repo.branch);
-  }
-
-  history(repo: RepoRow, p: string | undefined, limit = 50, opts: { anyPath?: boolean } = {}) {
-    this.check(repo);
-    return this.store.history(repo.id, repo.branch, p ? (opts.anyPath ? dirPath(p) : path(p)) : undefined, Math.min(Math.max(limit, 1), 200));
-  }
-
-  async diff(repo: RepoRow, sha: string, p?: string, opts: { anyPath?: boolean } = {}) {
-    this.check(repo);
-    if (!/^[0-9a-f]{7,64}$/i.test(sha)) throw new OpError(400, "invalid sha");
-    const at = p ? (opts.anyPath ? dirPath(p) : path(p)) : undefined;
-    try {
-      return await this.store.diff(repo.id, sha, at);
-    } catch {
-      throw new OpError(404, `commit ${sha} not found`);
-    }
-  }
-
-  async search(repo: RepoRow, q: string) {
-    this.check(repo);
-    if (!q.trim()) return { hits: [] };
-    const head = await this.store.head(repo.id, repo.branch);
-    return head ? this.store.search(repo.id, head, q, 100) : { hits: [] };
-  }
-
-  async snapshot(repo: RepoRow, since: string | null, want: string[] = []): Promise<ShellSnapshot> {
-    this.check(repo);
-    const head = await this.store.head(repo.id, repo.branch);
-    // Open notes: give each change of their text (or their closing) a number, so a caller gets only what's newer.
-    const open = new Map(this.rooms.inRepo(repo.id).map((r) => [r.path, r.text.toString()] as const));
-    for (const [p, text] of open) if (this.liveSeen.get(p)?.text !== text) this.liveSeen.set(p, { seq: ++this.liveSeq, text });
-    for (const [p, s] of this.liveSeen) if (!open.has(p) && s.text !== null) this.liveSeen.set(p, { seq: ++this.liveSeq, text: null });
-    if (this.liveSeen.size > 1000) {
-      for (const [p, s] of this.liveSeen) {
-        if (s.text !== null) continue;
-        this.liveSeen.delete(p);
-        this.liveFloor = Math.max(this.liveFloor, s.seq);
-      }
-    }
-    const [epoch, sinceHead, sinceSeq] = (since ?? "").split(":");
-    const seq = Number(sinceSeq);
-    const full = epoch !== this.snapEpoch || sinceHead !== (head ?? "-") || !Number.isInteger(seq) || seq < this.liveFloor;
-    const listing = head ? await this.listing(repo, head) : null;
-    const out: ShellSnapshot = { version: `${this.snapEpoch}:${head ?? "-"}:${this.liveSeq}`, full, head, headDate: listing?.date ?? null, contents: {}, live: {}, closed: [] };
-    if (full) {
-      out.files = listing?.files ?? [];
-      for (const [p, text] of open) out.live[p] = text;
-    } else {
-      for (const [p, s] of this.liveSeen) {
-        if (s.seq <= seq) continue;
-        if (s.text === null) out.closed.push(p);
-        else out.live[p] = s.text;
-      }
-    }
-    if (!head || !listing) return out;
-    // Committed text: what's cached (full snapshots), then what was asked for, up to SNAPSHOT_BYTES.
-    let bytes = 0;
-    const sizes = new Map(listing.files.map((f) => [f.path, f.size]));
-    if (full) {
-      for (const f of listing.files) {
-        const text = headTexts.get(`${repo.id}\0${head}\0${f.path}`);
-        if (text === undefined || bytes + text.length > SNAPSHOT_BYTES) continue;
-        out.contents[f.path] = text;
-        bytes += text.length;
-      }
-    }
-    const toRead: string[] = [];
-    for (const p of want) {
-      const size = sizes.get(p);
-      if (size === undefined || p in out.contents) continue;
-      if (toRead.length && bytes + size > SNAPSHOT_BYTES) break;
-      toRead.push(p);
-      bytes += size;
-    }
-    let next = 0;
-    const read = async () => {
-      while (next < toRead.length) {
-        const p = toRead[next++]!;
-        const k = `${repo.id}\0${head}\0${p}`;
-        let text = headTexts.get(k);
-        if (text === undefined) {
-          try {
-            const got = await this.store.readFile(repo.id, p, head);
-            if (got === null) continue;
-            text = got;
-          } catch (e) {
-            if (!isErr(e, "FileTooLargeError", "StoreUnavailableError")) throw e;
-            (out.errors ??= {})[p] = { name: (e as Error).name, message: (e as Error).message };
-            continue;
-          }
-          cacheHeadText(k, text);
-        }
-        out.contents[p] = text;
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(SNAPSHOT_READS, toRead.length) }, read));
-    return out;
-  }
-
-  /** Markdown files at `head` with sizes and dates, and the head commit's date (one listing per head). */
-  private listing(repo: RepoRow, head: string) {
-    if (this.headListing?.head === head) return this.headListing.files;
-    const files = (async () => {
-      const files: FileMeta[] = this.store.listFilesWithMetadata
-        ? await this.store.listFilesWithMetadata(repo.id, head)
-        : (await this.store.listFiles(repo.id, head)).map((f) => ({ path: f, size: headTexts.get(`${repo.id}\0${head}\0${f}`)?.length ?? 0 }));
-      const [last] = await this.store.history(repo.id, repo.branch, undefined, 1).catch(() => []);
-      return { head, files: files.filter((f) => isMarkdown(f.path)), date: last?.date ?? null };
-    })();
-    const entry = { head, files };
-    this.headListing = entry;
-    files.catch(() => this.headListing === entry && (this.headListing = null));
-    return files;
-  }
-
   /**
-   * A shell command's writes. An agent's land on their own commits right after the command (clean boundaries):
-   * people's unsaved edits in those notes are committed first, as their own commit (`Room.settle`), each written
-   * note's text is pinned right after the write (`Room.pin`), and that text is committed as the agent's
-   * (`Room.commitPinned`); what people type meanwhile stays pending for a commit of their own.
+   * Store an uploaded image in `images/` next to note `notePath` (bytes content-addressed, the path mapped to them).
+   * The name is kept; another image with that name gets `name-2.png`…; an identical one already there is reused.
    */
-  async applyWrites(repo: RepoRow, writes: ShellWrite[], actor: Participant): Promise<(string | null)[]> {
-    this.check(repo);
-    const agent = actor.kind === "agent";
-    const pins = new Map<Room, PinnedWrite>();
-    const out: (string | null)[] = [];
-    for (const w of writes) {
-      try {
-        if (agent && w.base !== null) await (await this.room(repo, path(w.path))).settle();
-        if (w.base === null) await this.createFile(repo, w.path, w.content, actor);
-        else if (w.appended !== null) {
-          if (w.appended) await this.appendText(repo, w.path, w.appended, actor);
-        }
-        else await this.patchFile(repo, w.path, w.base, w.content, actor);
-        // (synchronously after the write: nobody's edit can land in between)
-        const r = agent ? this.rooms.peek(repo.id, path(w.path)) : undefined;
-        if (r && !r.closed) pins.set(r, r.pin(actor));
-        out.push(null);
-      } catch (e) {
-        out.push(e instanceof Error ? e.message : String(e));
-      }
-    }
-    for (const [r, pin] of pins) await r.commitPinned(pin).catch((e: unknown) => console.error(`[workspace ${this.id}] agent commit ${r.path}:`, e));
-    return out;
-  }
-
-  async save(repo: RepoRow, paths: string[], dirs: string[] = []): Promise<SaveResult[]> {
+  async uploadImage(repo: RepoRow, notePath: string, filename: string, bytes: Uint8Array, actor: Participant) {
     this.check(repo);
     writable(repo);
-    const want = [...paths];
-    for (const d of dirs) for (const r of this.rooms.inRepo(repo.id)) if (under(d, r.path)) want.push(r.path);
-    const out: SaveResult[] = [];
-    for (const p of new Set(want)) {
-      const room = this.rooms.peek(repo.id, p);
-      if (!room?.dirty) {
-        out.push({ path: p, saved: false, commit: room?.status().commit ?? null });
-        continue;
-      }
-      await room.flush();
-      out.push({ path: p, saved: true, commit: room.status().commit });
-    }
-    return out;
-  }
-
-  /** The room's participants and the visible v2 channels on the note (those count even while their room sleeps). */
-  async who(repo: RepoRow, p: string): Promise<PresenceUser[]> {
-    this.check(repo);
-    return this.sockets.presence(p);
-  }
-
-  private dirtyRooms(repo: RepoRow, dir: string) {
-    return this.rooms
-      .inRepo(repo.id)
-      .filter((r) => r.dirty && under(dir, r.path))
-      .sort((a, b) => (a.path < b.path ? -1 : 1));
-  }
-
-  async status(repo: RepoRow, dir: string): Promise<DirtyNote[]> {
-    this.check(repo);
-    return this.dirtyRooms(repo, dir).map((r) => ({ path: r.path, inBase: r.inBase }));
-  }
-
-  async liveDiff(repo: RepoRow, dir: string): Promise<string> {
-    this.check(repo);
-    return this.dirtyRooms(repo, dir)
-      .map((r) => unified(r.path, r.inBase ? r.baseContent : null, r.text.toString()))
-      .join("");
-  }
-
-  /**
-   * What people changed by hand since the newest agent commit (`changes`, changes.ts): from that commit (or, with
-   * none, from nothing) to the current text, unsaved live edits included. `p`: one note, or a folder.
-   */
-  async changes(repo: RepoRow, p = ""): Promise<ChangesResult> {
-    this.check(repo);
-    const scope = p ? dirPath(p) : "";
-    const inScope = (f: string) => isMarkdown(f) && under(scope, f);
-    const head = await this.store.head(repo.id, repo.branch);
-    const commits = head ? await this.store.history(repo.id, repo.branch, undefined, CHANGES_HISTORY) : [];
-    const at = commits.findIndex((c) => AGENT_EMAIL.test(c.authorEmail));
-    const agentCommit = at >= 0 ? commits[at]! : null;
-    const base = agentCommit?.sha ?? null;
-    // the notes to compare: what the commits since the agent's touched (all of them without one), and open notes
-    const candidates = new Set<string>();
-    const live = new Map(this.rooms.inRepo(repo.id).filter((r) => !r.closed && r.dirty).map((r) => [r.path, r.text.toString()] as const));
-    for (const f of live.keys()) candidates.add(f);
-    const since = at >= 0 ? commits.slice(0, at) : commits;
-    if (base === null || since.length >= CHANGES_HISTORY) {
-      // no agent commit (or too many commits since): every note there is now, and every one the agent commit had
-      for (const f of head ? await this.store.listFiles(repo.id, head) : []) candidates.add(f);
-      if (base) for (const f of await this.store.listFiles(repo.id, base)) candidates.add(f);
-    } else {
-      let next = 0;
-      const read = async () => {
-        while (next < since.length) for (const f of diffPaths(await this.store.diff(repo.id, since[next++]!.sha))) candidates.add(f);
-      };
-      await Promise.all(Array.from({ length: Math.min(6, since.length) }, read));
-    }
-    const paths = [...candidates].filter(inScope).sort();
-    const before = new Map<string, string | null>();
-    const after = new Map<string, string | null>();
-    let next = 0;
-    const load = async () => {
-      while (next < paths.length) {
-        const f = paths[next++]!;
-        const [b, a] = await Promise.all([
-          base ? this.store.readFile(repo.id, f, base).catch(() => null) : Promise.resolve(null),
-          live.has(f) ? Promise.resolve(live.get(f)!) : head ? this.store.readFile(repo.id, f, head).catch(() => null) : Promise.resolve(null),
-        ]);
-        before.set(f, b);
-        after.set(f, a);
-      }
+    const note = path(notePath);
+    if (!bytes.length) throw new OpError(400, "the file is empty");
+    const max = isDemoRoom(repo.id) ? demoLimits.imageBytes : MAX_UPLOAD_BYTES;
+    if (bytes.length > max) throw new OpError(413, `images can be at most ${max / 1024 / 1024} MB`);
+    const sniffed = sniffImage(bytes);
+    if (!sniffed) throw new OpError(415, `not an image (${Object.keys(IMAGE_TYPES).join(", ")})`);
+    const { name, stem, ext } = uploadName(filename, sniffed);
+    const dir = [...note.split("/").slice(0, -1), "images"].join("/");
+    const candidate = (n: number) => imagePath(`${dir}/${n === 1 ? name : `${stem}-${n}.${ext}`}`).path;
+    const result = (p: string, reused: boolean) => {
+      const markdownPath = encodeLinkPath(p.slice(dir.length - "images".length));
+      return { path: p, markdownPath, markdown: `![${escapeAlt(stem)}](${markdownPath})`, reused };
     };
-    await Promise.all(Array.from({ length: Math.min(8, paths.length) }, load));
-    const added = paths.filter((f) => before.get(f) === null && after.get(f) !== null);
-    const deleted = paths.filter((f) => before.get(f) !== null && after.get(f) === null);
-    // a deleted note whose text reappears as an added one: renamed
-    const renamed = new Map<string, string>();
-    for (const d of deleted) {
-      const to = added.find((a) => !renamed.has(a) && after.get(a) === before.get(d));
-      if (to) renamed.set(to, d);
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    for (let n = 1; n <= 1000; n++) {
+      const cand = candidate(n);
+      const existing = this.store.image(cand);
+      if (existing?.sha256 === sha) return result(cand, true);
+      if (existing) continue;
+      if (isDemoRoom(repo.id) && this.store.images().reduce((s, i) => s + i.size, 0) + bytes.length > demoLimits.imagesBytes) throw new OpError(413, DEMO_FULL);
+      await this.blobs.put(`${this.id}/${sha}`, bytes, IMAGE_TYPES[ext]);
+      this.store.putImage({ path: cand, sha256: sha, type: imagePath(cand).type, size: bytes.length }, actor.id);
+      return result(cand, false);
     }
-    const files: ChangedFile[] = [];
-    let bytes = 0;
-    let truncated = false;
-    for (const f of paths) {
-      const b = before.get(f) ?? null;
-      const a = after.get(f) ?? null;
-      if (b === a || [...renamed.values()].includes(f)) continue;
-      const from = renamed.get(f);
-      const d = fileDiff(f, from ? before.get(from)! : b, a, from);
-      const status = from ? "renamed" : b === null ? "added" : a === null ? "deleted" : "modified";
-      if (bytes + d.diff.length > MAX_CHANGES_BYTES) {
-        truncated = true;
-        d.diff = "";
-      }
-      bytes += d.diff.length;
-      files.push({ ...d, status });
-    }
-    return { since: agentCommit ? { commit: agentCommit.sha, agent: agentCommit.authorName, at: agentCommit.date } : null, files, truncated };
+    throw new OpError(409, `too many images named ${name}`);
   }
 
-  /** In-process callers may pass a signal (the shell's Ctrl-C); it can't cross RPC. */
-  waitForChange(p: string | undefined, timeoutMs: number, signal?: AbortSignal) {
-    return waitForChange(this.id, p, timeoutMs, signal);
+  // ---- the note shell ----
+
+  private limited(key: string): number {
+    const now = Date.now();
+    if (this.calls.size > 10_000) for (const [k, v] of this.calls) if (now - v.start >= 60_000) this.calls.delete(k);
+    const c = this.calls.get(key);
+    if (!c || now - c.start >= 60_000) {
+      this.calls.set(key, { start: now, n: 1 });
+      return 0;
+    }
+    return ++c.n > agentLimits.perMinute ? Math.max(1, Math.ceil((c.start + 60_000 - now) / 1000)) : 0;
   }
 
-  async onPush(repo: RepoRow, opts: { fresh?: boolean; invalidate?: boolean } = {}) {
+  async noteCommand(repo: RepoRow, p: string, cmd: NoteCommand, actor: Participant): Promise<NoteShellResult> {
     this.check(repo);
-    if (opts.invalidate) this.store.invalidate?.(repo.id);
-    if (repo.status !== "ready") return;
-    let head: string | null;
+    p = path(p);
+    const wait = this.limited(cmd.limitKey);
+    if (wait) throw new OpError(429, `Too many calls: at most ${agentLimits.perMinute} per minute. Retry in ${wait} s.`);
+    if ((this.running.get(cmd.limitKey) ?? 0) >= agentLimits.concurrent) throw new OpError(429, `${agentLimits.concurrent} commands are already running; wait for them to finish`);
+    const note = this.store.byPath(p);
+    if (!note && !cmd.create) throw new OpError(404, `${p} doesn't exist (creating notes needs an account: send Authorization: Bearer <token>)`);
+    const room = note ? this.room(p) : null;
+    const base = room ? room.text.toString() : null;
+    const noteId = note?.id ?? null;
+    const store = this.store;
+    this.running.set(cmd.limitKey, (this.running.get(cmd.limitKey) ?? 0) + 1);
+    let r: NoteShellResult;
     try {
-      head = await this.store.head(repo.id, repo.branch, opts.fresh ? { fresh: true } : undefined);
-    } catch {
-      return;
+      r = await runNoteCommand({
+        name: p.split("/").pop()!,
+        text: base,
+        command: cmd.command,
+        timeoutMs: cmd.timeoutMs,
+        user: actor.name,
+        host: {
+          history: (n) =>
+            noteId
+              ? store.versions(noteId, n).map((v) => {
+                  const s = summary(v);
+                  return { id: s.sha, date: s.date.replace(/\.\d+Z$/, "Z"), author: s.authorName, kind: v.kind, message: v.kind === "rename" || v.kind === "restore" ? (v.message ?? "") : "" };
+                })
+              : [],
+          show: (id) => {
+            const v = noteId ? store.version(parseVersionRef(id) ?? 0) : null;
+            return v && v.note_id === noteId ? v.text : null;
+          },
+          diff: (id) => {
+            const v = noteId ? store.version(parseVersionRef(id) ?? 0) : null;
+            if (!v || v.note_id !== noteId) return null;
+            const prev = store.previous(v);
+            return unified(v.path, prev ? prev.text : null, v.text) || "(no changes)\n";
+          },
+          who: () => this.sockets.presence(p).map((u) => ({ name: u.name, kind: u.kind })),
+        },
+      });
+    } finally {
+      const n = (this.running.get(cmd.limitKey) ?? 1) - 1;
+      if (n > 0) this.running.set(cmd.limitKey, n);
+      else this.running.delete(cmd.limitKey);
     }
-    if (this.lastHead === head) return;
-    this.treeCache = null;
-    // Merge into open rooms first, so anyone woken by the notification reads the new text.
-    // Our own commits move the head too; rooms that already have it treat this as a no-op.
-    const results = await Promise.allSettled(this.rooms.inRepo(repo.id).map((r) => r.checkRemote()));
-    // Only remember the head once every room has it, so a failed merge is retried on the next poll.
-    if (results.every((r) => r.status === "fulfilled")) this.lastHead = head;
-    emit({ type: "tree", repo: repo.id });
-    notifyChange(repo.id);
-  }
-
-  /** Concurrent calls share one refresh; `minIntervalMs` skips pulls that just ran (other workspaces only re-check their head). */
-  refresh(repo: RepoRow, minIntervalMs = 0): Promise<void> {
-    this.check(repo);
-    if (this.refreshing) return this.refreshing;
-    const p = (async () => {
-      const upstream = repo.kind === "github" && !!repo.read_only && repo.status === "ready" && !!this.store.pullUpstream;
-      if (upstream && Date.now() - this.lastRefresh >= minIntervalMs) {
-        // Counted from the attempt, so failures are rate limited too.
-        this.lastRefresh = Date.now();
-        await this.store.pullUpstream!(repo.id, repo.branch);
+    if (r.wrote === undefined) return r;
+    const note2 = (msg: string) => {
+      r.stderr += `[grim: ${msg}]\n`;
+      if (r.exitCode === 0) r.exitCode = 1;
+    };
+    if (r.wrote === null) {
+      note2(`${p.split("/").pop()} can't be deleted from the shell; nothing was changed`);
+      delete r.wrote;
+      return r;
+    }
+    try {
+      if (!room) {
+        await this.createFile(repo, p, r.wrote, actor);
+        this.room(p).cut("agent", { force: true, by: actor });
+      } else {
+        writable(repo);
+        if (room.closed) throw new OpError(409, `${p} was closed (renamed or deleted) while the command ran`);
+        // people's edits not cut yet are their own version; the agent's write is its own
+        room.cut("edit");
+        this.patchRoom(repo, room, base!, r.wrote, actor);
+        room.cut("agent", { by: actor });
       }
-      // (other workspaces' heads only move from outside Grim, which isn't picked up)
-      if (upstream) await this.onPush(repo, { fresh: true });
-    })().finally(() => {
-      if (this.refreshing === p) this.refreshing = null;
-    });
-    this.refreshing = p;
-    return p;
+    } catch (e) {
+      note2(`not saved: ${e instanceof Error ? e.message : String(e)}`);
+      delete r.wrote;
+    }
+    return r;
   }
 
-  async seenHead(head: string | null) {
-    this.lastHead = head;
+  // ---- export, import, epochs, removal ----
+
+  async exportZip(repo: RepoRow): Promise<Uint8Array<ArrayBuffer>> {
+    this.check(repo);
+    for (const r of this.rooms.inRepo(this.id)) r.compact();
+    const notes = this.store.list().map((n) => ({ path: n.path, data: this.store.byPath(n.path)!.text }));
+    const images: Array<{ path: string; data: Uint8Array }> = [];
+    for (const i of this.store.images()) {
+      const bytes = await this.blobs.get(`${this.id}/${i.sha256}`);
+      if (bytes) images.push({ path: i.path, data: bytes });
+    }
+    const versions = this.store.allVersions().map((v) => ({ ...summary(v), note: v.note_id, text: v.text }));
+    return zip([...notes, ...images, { path: ".grim/versions.json", data: JSON.stringify({ workspace: { id: repo.id, title: repo.title }, exported: new Date().toISOString(), versions }, null, 1) }]);
+  }
+
+  async importNotes(repo: RepoRow, notes: ImportNote[], images: Array<{ path: string; base64: string }>): Promise<string[]> {
+    this.check(repo);
+    const made: string[] = [];
+    for (const n of notes) {
+      const p = path(n.path);
+      if (this.store.byPath(p)) continue;
+      const versions = n.versions.map((v) => ({ ...v, person: importedPerson(v.authorName, v.authorEmail), at: Date.parse(v.date) || Date.now() }));
+      const lines = versions.length ? authorsFromVersions([...versions.map((v) => ({ text: v.text, author: v.person })), { text: n.text, author: versions.at(-1)!.person }]) : null;
+      const note = this.store.create(p, n.text, { authors: lines, now: versions[0]?.at });
+      for (const v of versions) {
+        const vl = authorsFromVersions(versions.slice(0, versions.indexOf(v) + 1).map((x) => ({ text: x.text, author: x.person })));
+        this.store.cutVersion(note.id, { kind: "import", path: p, text: v.text, started: v.at, ended: v.at, authors: [{ ...v.person, edits: 1 }], lines: vl, message: v.message?.split("\n")[0] || null });
+      }
+      if (!versions.length || versions.at(-1)!.text !== n.text) this.store.cutVersion(note.id, { kind: "import", path: p, text: n.text, started: Date.now(), authors: [], lines, message: `Import ${p}` });
+      made.push(p);
+    }
+    for (const i of images) {
+      const bytes = new Uint8Array(Buffer.from(i.base64, "base64"));
+      const { path: ip, type } = imagePath(i.path);
+      const sha = createHash("sha256").update(bytes).digest("hex");
+      await this.blobs.put(`${this.id}/${sha}`, bytes, type);
+      this.store.putImage({ path: ip, sha256: sha, type, size: bytes.length }, null);
+    }
+    emit({ type: "tree", repo: repo.id });
+    return made;
+  }
+
+  async bumpEpochs(): Promise<number> {
+    for (const r of this.rooms.inRepo(this.id)) {
+      for (const c of [...r.conns]) c.close(1013, "reset");
+      r.destroy();
+    }
+    let n = 0;
+    for (const p of this.store.paths()) {
+      const note = this.store.byPath(p)!;
+      this.store.bumpEpoch(note.id);
+      n++;
+    }
+    return n;
   }
 
   async remove() {
-    for (const room of this.rooms.inRepo(this.id)) {
-      if (room.dirty) await room.flush().catch(() => {});
-      room.closeWith("removed");
-    }
+    for (const room of this.rooms.inRepo(this.id)) room.closeWith("removed");
     if (this.sockets.size) {
       this.sockets.broadcast({ t: "workspace", status: "removed" });
       this.closeSockets(CLOSE.notFound, "workspace removed");
     }
-    this.treeCache = null;
-    this.lastHead = undefined;
-    this.lastRefresh = 0;
+    for (const i of this.store.images()) await this.blobs.delete(`${this.id}/${i.sha256}`).catch(() => {});
+    this.store.wipe();
   }
 }
 
 /**
- * The in-process host: a Map of runtimes, made on first use. The runtimes share one store and one RoomManager
- * (keyed by workspace, so each runtime only sees its own rooms).
+ * The in-process host: a Map of runtimes, made on first use, sharing one RoomManager (keyed by workspace).
  */
 export class RuntimeMap implements WorkspaceHost {
   protected runtimes = new Map<string, WorkspaceRuntime>();
 
   constructor(
-    protected store: HeadCachingStore,
     readonly rooms: RoomManager,
+    protected blobsFor: (repoId: string) => BlobStore,
   ) {}
 
   get(repoId: string): WorkspaceRuntime {
     let rt = this.runtimes.get(repoId);
-    if (!rt) this.runtimes.set(repoId, (rt = new WorkspaceRuntime(repoId, this.store, this.rooms)));
+    if (!rt) this.runtimes.set(repoId, (rt = new WorkspaceRuntime(repoId, this.rooms, this.blobsFor(repoId))));
     return rt;
   }
 

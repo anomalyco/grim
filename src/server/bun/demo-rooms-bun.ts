@@ -1,22 +1,24 @@
-// Bun's demo rooms (demo-rooms.ts): the lobby, and each room's in-memory store, in the server process. A room is made
-// (row + seeded MemoryStore) when the lobby needs one and dropped (rooms discarded, store and row gone) once nobody
-// has been in it for a while. Sockets tell it who is connected where, so they keep their places.
-import { createDemoRoomRow, deleteDemoRoomRow, deleteStaleDemoRows, newDemoStore, seedDemoRepo, startDemoResets } from "../demo.ts";
+// Bun's demo rooms (demo-rooms.ts): the lobby, and each room's in-memory NoteStore, in the server process. A room is
+// made (row + seeded notes) when the lobby needs one and dropped (rooms discarded, store and row gone) once nobody has
+// been in it for a while. Sockets tell it who is connected where, so they keep their places.
+import { Database } from "bun:sqlite";
+import { createDemoRoomRow, deleteDemoRoomRow, deleteStaleDemoRows, seedDemo, startDemoResets } from "../demo.ts";
 import { DEMO_REPORT_MS, DemoLobby, isDemoRoom, localGate, setDemoGate, type LobbyOptions } from "../demo-rooms.ts";
-import type { Ctx } from "../ops.ts";
 import { forgetRepo } from "../repo-cache.ts";
 import type { Db } from "../seams/db.ts";
-import type { MemoryStore } from "../store/memory.ts";
-import type { WorkspaceHost } from "../seams/workspace-host.ts";
+import { NoteStore } from "../notes/store.ts";
+import { MemoryBlobs } from "../notes/blobs-memory.ts";
+import { BunRoomStorage } from "./room-storage-bun.ts";
+import type { LocalWorkspaceHost } from "./workspace-host-local.ts";
 
 export class BunDemoRooms {
-  readonly stores = new Map<string, MemoryStore>();
+  readonly stores = new Map<string, NoteStore>();
+  readonly blobs = new Map<string, MemoryBlobs>();
   readonly lobby: DemoLobby;
   /** room → person → open sockets */
   private conns = new Map<string, Map<string, number>>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopResets: () => void = () => {};
-  private ctx: Ctx | null = null;
 
   constructor(
     private db: Db,
@@ -29,16 +31,28 @@ export class BunDemoRooms {
     });
   }
 
-  /** The store of a demo room (RoutedStore's lookup); undefined for every other repo. */
-  storeFor = (repo: string) => (isDemoRoom(repo) ? this.stores.get(repo) : undefined);
+  /** A demo room's notes (an in-memory SQLite of its own). */
+  storeFor(repo: string): NoteStore {
+    let s = this.stores.get(repo);
+    if (!s) this.stores.set(repo, (s = new NoteStore(new BunRoomStorage(new Database(":memory:")), repo)));
+    return s;
+  }
+
+  blobsFor(repo: string): MemoryBlobs {
+    let b = this.blobs.get(repo);
+    if (!b) this.blobs.set(repo, (b = new MemoryBlobs()));
+    return b;
+  }
+
+  private host: LocalWorkspaceHost | null = null;
 
   /** Start: rows left by the last run go, the gate is this lobby, rooms report every DEMO_REPORT_MS and reset on schedule. */
-  async start(ctx: Ctx) {
-    this.ctx = ctx;
+  async start(host: LocalWorkspaceHost) {
+    this.host = host;
     await deleteStaleDemoRows(this.db, new Set());
     setDemoGate(localGate(this.lobby));
     this.timer = setInterval(() => this.reportAll(), DEMO_REPORT_MS);
-    this.stopResets = startDemoResets(ctx, () => [...this.stores.keys()]);
+    this.stopResets = startDemoResets((id) => host.get(id), () => [...this.stores.keys()]);
   }
 
   /** A socket of `person` opened, or closed, in a demo room. */
@@ -64,18 +78,17 @@ export class BunDemoRooms {
   }
 
   private async create(id: string) {
-    const ctx = this.ctx!;
-    this.stores.set(id, newDemoStore());
+    this.storeFor(id);
     await createDemoRoomRow(this.db, id);
-    await seedDemoRepo(ctx.store, id);
+    await seedDemo(this.host!.get(id));
   }
 
   private async drop(id: string) {
-    const ctx = this.ctx!;
     this.conns.delete(id);
-    await ctx.rooms.discardRepo(id);
-    (ctx.repos.host as WorkspaceHost & { forget?(id: string): void }).forget?.(id);
+    await this.host!.rooms.discardRepo(id);
+    this.host!.forget(id);
     this.stores.delete(id);
+    this.blobs.delete(id);
     await deleteDemoRoomRow(this.db, id);
     forgetRepo(id);
   }

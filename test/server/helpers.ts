@@ -1,5 +1,7 @@
 // Shared bits for the workspace and sign-in tests: a fake Google (keys, tokens, the OAuth dance) and a small room client.
 import * as Y from "yjs";
+import type { Ctx } from "../../src/server/ops.ts";
+import { GRIM } from "../../src/server/repos.ts";
 import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
@@ -189,17 +191,11 @@ export function isolate(config: Record<string, any>, db: { query(sql: string): {
  * A notes workspace `id` (nobody's, with Welcome.md), made directly in the server's store and tables: what tests used
  * the old default notebook (NOTES_REPO) for. `joinFor`: user ids that have it in their list.
  */
-export async function seedNotebook(
-  ctx: { store: { createRepo(id: string, o: { branch: string }): Promise<void>; head(id: string, branch: string): Promise<string | null>; commit(c: any): Promise<unknown> }; repos: { db: { run(sql: string, ...p: unknown[]): Promise<unknown> }; get(id: string): Promise<unknown> } },
-  id: string,
-  joinFor: string[] = [],
-) {
+export async function seedNotebook(ctx: Ctx, id: string, joinFor: string[] = []) {
   if (!(await ctx.repos.get(id))) {
-    await ctx.store.createRepo(id, { branch: "main" });
     await ctx.repos.db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, 'Notes', 'notes', 'main', 'ready', ?) ON CONFLICT (id) DO NOTHING", id, Date.now());
-    if (!(await ctx.store.head(id, "main"))) {
-      await ctx.store.commit({ repo: id, branch: "main", expectedHead: null, changes: [{ path: "Welcome.md", content: "# Welcome to Grim\n" }], message: "Create Welcome.md", author: { name: "Grim", email: "grimoire@users.noreply.code.storage" } });
-    }
+    const row = (await ctx.repos.get(id))!;
+    if (!(await ctx.repos.tree(row)).length) await ctx.repos.host.get(id).createFile(row, "Welcome.md", "# Welcome to Grim\n", GRIM);
   }
   for (const u of joinFor) await ctx.repos.db.run("INSERT INTO joined (workspace_id, user_id, via, joined_at) VALUES (?, ?, 'link', ?) ON CONFLICT DO NOTHING", id, u, Date.now());
 }

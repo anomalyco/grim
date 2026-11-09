@@ -10,27 +10,26 @@ import * as decoding from "lib0/decoding";
 
 const dir = mkdtempSync(join(process.env.DATA_DIR!, "wsmux-"));
 
-const { LocalGitStore } = await import("../../src/server/store/localgit.ts");
 const { RoomManager } = await import("../../src/server/rooms.ts");
-const { bunRoomStorage } = await import("../../src/server/bun/room-storage-bun.ts");
-const { bunDb } = await import("../../src/server/bun/db-bun.ts");
+const { BunRoomStorage } = await import("../../src/server/bun/room-storage-bun.ts");
+const { NoteStore } = await import("../../src/server/notes/store.ts");
+const { Database } = await import("bun:sqlite");
 const { admitFile } = await import("../../src/server/workspace.ts");
 const mux = await import("../../src/server/wsmux.ts");
 type Conn = import("../../src/server/room.ts").Conn;
 type MuxHost = import("../../src/server/wsmux.ts").MuxHost;
 type MuxState = import("../../src/server/wsmux.ts").MuxState;
 
-const store = new LocalGitStore(join(dir, "git"));
-const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
+const storage = new BunRoomStorage(new Database(":memory:"));
+const rooms = new RoomManager({ store: (repo) => new NoteStore(storage, repo) });
 const alice = { id: "u1", name: "Alice", email: "alice@example.com", kind: "human" as const, color: "#f00" };
 const bob = { id: "u2", name: "Bob", email: "bob@example.com", kind: "human" as const, color: "#00f" };
 
 let repoN = 0;
 async function seed(files: Record<string, string>) {
   const repo = `mux${++repoN}`;
-  await store.createRepo(repo, { branch: "main" });
-  const r = await store.commit({ repo, branch: "main", expectedHead: await store.head(repo, "main"), changes: Object.entries(files).map(([path, content]) => ({ path, content })), message: "seed", author: alice });
-  if (!r.ok) throw new Error("seed failed");
+  const notes = new NoteStore(storage, repo);
+  for (const [path, content] of Object.entries(files)) notes.create(path, content);
   return repo;
 }
 
@@ -52,7 +51,7 @@ function socket(repo: string, opts: { user?: typeof alice; readOnly?: boolean; n
   const host: MuxHost = {
     async openRoom(path) {
       if (opts.status === "importing") return { reject: { code: 1013, reason: "repo importing" } };
-      const d = await admitFile(rooms, { repoId: repo, branch: "main", path, participant: opts.user ?? alice, readOnly: false });
+      const d = await admitFile(rooms, { repoId: repo, path, participant: opts.user ?? alice, readOnly: false });
       return "reject" in d ? { reject: d.reject as any } : { room: d.room };
     },
     send(data) {
@@ -70,7 +69,7 @@ function socket(repo: string, opts: { user?: typeof alice; readOnly?: boolean; n
     wakeRoom: opts.wakeRoom,
     now: opts.now,
   };
-  const sock = mux.createWorkspaceSocket(host, opts.restore ? { restore: opts.restore } : { admission: { v: 2, repoId: repo, branch: "main", status: "ready", participant: opts.user ?? alice, readOnly: !!opts.readOnly } });
+  const sock = mux.createWorkspaceSocket(host, opts.restore ? { restore: opts.restore } : { admission: { v: 2, repoId: repo, status: "ready", participant: opts.user ?? alice, readOnly: !!opts.readOnly } });
   const next = (pred: (o: Out) => boolean) => {
     const seen = out.find(pred);
     return seen ? Promise.resolve(seen) : new Promise<Out>((resolve) => waiters.push({ pred, resolve }));

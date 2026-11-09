@@ -1,5 +1,6 @@
 // Folders (workspaces) are public: anyone signed in opens and edits any of them (and anyone reads them); the joined list; only
 // the maker removes a folder; agent links (one per person per folder); and the migration of older databases.
+import { GRIM } from "../../src/server/repos.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -14,7 +15,6 @@ const { db: earlyDb } = await import("../../src/server/db.ts");
 const restore = isolate(config, earlyDb);
 Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 100 });
 config.github.clientId = "";
-config.github.appSlug = "";
 const { startServer } = await import("../../src/server/index.ts");
 
 let app: Awaited<ReturnType<typeof startServer>>;
@@ -56,14 +56,8 @@ async function workspace(owner: Person, title: string, files: Record<string, str
   expect(r.status).toBe(201);
   const id = r.data.id as string;
   if (Object.keys(files).length) {
-    await app.ctx.store.commit({
-      repo: id,
-      branch: "main",
-      expectedHead: await app.ctx.store.head(id, "main"),
-      changes: Object.entries(files).map(([path, content]) => ({ path, content })),
-      message: "seed",
-      author: { name: "x", email: "x@example.com" },
-    });
+    const row = (await app.ctx.repos.get(id))!;
+    for (const [path, content] of Object.entries(files)) await app.ctx.repos.host.get(id).createFile(row, path, content, GRIM);
   }
   return id;
 }

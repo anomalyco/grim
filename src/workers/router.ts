@@ -4,9 +4,9 @@
 //   deps: a D1 `Db` per request, the caller's IP from CF-Connecting-IP, `caches.default` for immutable raw images.
 // - /ws: auth, cross-origin and workspace checks run here (admitWorkspace); a rejection is an upgrade-then-close
 //   with the code, an accepted upgrade is forwarded to the workspace's Durable Object with the admission data.
-// - Agents' commands on a workspace URL (POST /app/<id>) and /mcp run in a ShellDO: the Worker finds out who calls (a
-//   bearer token's account, else anonymous with its IP) and forwards, with the caller in a header. Old agent links
-//   (/a/*) get a 410 from the shared app.
+// - Agents' commands on a note URL (POST /app/<id>/<note>) and /mcp are handled by the shared app here; the command
+//   itself runs in the workspace's Durable Object (WorkspaceApi.noteCommand), which sees every call it limits.
+//   Old agent links (/a/*) get a 410 from the shared app.
 // Static files never reach the Worker except through the run_worker_first paths (wrangler.jsonc): /app/* does, so
 // note URLs can answer Markdown to non-browsers; browsers get index.html from the assets binding.
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -14,27 +14,18 @@ import { admitSocket, admitWorkspace, createApp, type SocketAdmission, type Upgr
 import { setInlinePrune, signInProblem } from "../server/auth.ts";
 import { config } from "../server/config.ts";
 import { setWsProtocols } from "../server/api.ts";
-import type { McpServer } from "../server/mcp.ts";
+import { McpServer } from "../server/mcp.ts";
 import type { Ctx } from "../server/ops.ts";
 import { isNoteUrl, wantsApp, withVaryAccept } from "../server/note-url.ts";
 import { withShareMeta } from "../server/share-meta.ts";
 import { notePeer } from "../server/proxy.ts";
-import { RepoService, type ImportScheduler } from "../server/repos.ts";
-import { RoomManager } from "../server/rooms.ts";
+import { RepoService } from "../server/repos.ts";
 import type { Db } from "../server/seams/db.ts";
-import type { RoomStorage } from "../server/seams/room-storage.ts";
 import type { WorkspaceApi, WorkspaceHost } from "../server/seams/workspace-host.ts";
 import type { AdmittedSocket } from "../server/wsmux.ts";
-import type { ShellSessions } from "../server/shell/session.ts";
-import { CachedHeadStore } from "../server/store/cached-head.ts";
-import { CodeStorageStore } from "../server/store/codestorage.ts";
-import { MemoryStore } from "../server/store/memory.ts";
-import type { GitStore } from "../server/store/types.ts";
 import { d1Db } from "./db-d1.ts";
 import { repoCacheDb } from "../server/repo-cache.ts";
 import { useWorkersDemoGate } from "./demo.ts";
-import { agentCaller, agentWorkspace } from "../server/agent-url.ts";
-import { AGENT_CALLER_HEADER, agentShellName, SHELL_CALLER_HEADER, userShellName, type ShellCaller } from "./shell-do.ts";
 import type { Env } from "./index.ts";
 import { Timing, timedDb, withServerTiming } from "./timing.ts";
 import { setMetricsRunner, setTrustCountryHeader } from "../server/metrics.ts";
@@ -61,12 +52,7 @@ export function readAdmission(req: Request): Admission | AdmittedSocket | null {
   }
 }
 
-/** Raw images by commit (`?ref=<sha>`) never change: kept in the colo's cache this long. */
-const RAW_CACHE_SECONDS = 86_400;
-const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const RAW_PATH = /^\/api\/repos\/[^/]+\/raw$/;
-
-/** Durable Objects first created by server code are placed in eastern North America, near D1's primary and Code Storage. */
+/** Durable Objects first created by server code are placed in eastern North America, near D1's primary. */
 export const LOCATION = { locationHint: "enam" } as const;
 
 interface Scope {
@@ -95,47 +81,7 @@ const requestDb: Db = repoCacheDb({
   batch: (stmts) => current().db.batch(stmts),
 });
 
-/** Rooms live in WorkspaceDO (CF-24); a room opened in the Worker itself has nowhere to keep its crash log. */
-const noRoomStorage: RoomStorage = {
-  exec() {
-    throw new Error("rooms are not hosted in the Worker");
-  },
-  transaction() {
-    throw new Error("rooms are not hosted in the Worker");
-  },
-  putBlob() {
-    throw new Error("rooms are not hosted in the Worker");
-  },
-  getBlob() {
-    return null;
-  },
-};
-
-export interface RouterOptions {
-  /** The Git store; default Code Storage when configured, else an in-memory store (wrangler dev without secrets). */
-  store?: () => GitStore;
-}
-
 type App = ReturnType<typeof createApp>;
-
-let sharedStore: GitStore | null = null;
-
-/**
- * The isolate's Git store, shared by the Worker and the Durable Objects in it: Code Storage when configured, else an
- * in-memory store (wrangler dev without secrets, where the Worker and its Durable Objects share one isolate).
- */
-export function gitStore(): GitStore {
-  return (sharedStore ??=
-    config.storage === "codestorage"
-      ? new CodeStorageStore({
-          org: config.codeStorage.org,
-          key: config.codeStorage.key,
-          apiBaseUrl: config.codeStorage.apiBaseUrl,
-          storageBaseUrl: config.codeStorage.storageBaseUrl,
-          repoPrefix: config.codeStorage.repoPrefix,
-        })
-      : new MemoryStore());
-}
 
 // Expired sessions are pruned by the cron (cron.ts), never on a request: a new isolate's first sign-in check would
 // otherwise wait on a D1 write to the primary.
@@ -153,27 +99,17 @@ setTrustCountryHeader(true);
 setPersonalKeepAlive((p) => scope.getStore()?.waitUntil(p));
 
 /** Builds the Worker's fetch handler. The shared app (store, caches) is made on the first request and kept per isolate. */
-export function createRouter(opts: RouterOptions = {}) {
+export function createRouter() {
   let app: { app: App; ctx: Ctx } | null = null;
 
   function setup(env: Env): { app: App; ctx: Ctx } {
     if (app) return app;
-    // Commits happen in the WorkspaceDOs, whose head caches are the ones kept up to date; API answers read heads from
-    // there (host.head). This cache only serves the Worker's own store calls (imports, workspace creation), briefly.
-    const store = new CachedHeadStore(opts.store?.() ?? gitStore(), { maxAgeMs: WORKER_HEAD_MAX_AGE_MS });
-    // Rooms live in the workspaces' Durable Objects: ops, tree, pushes and refreshes go to WorkspaceDO by RPC (a stub
-    // per call: stubs belong to the request that made them). This RoomManager stays empty.
-    const rooms = new RoomManager(store, { storage: noRoomStorage, db: requestDb });
+    // Notes live in the workspaces' Durable Objects: every operation goes to WorkspaceDO by RPC (a stub per call:
+    // stubs belong to the request that made them).
     const host: WorkspaceHost = { get: (id) => env.WORKSPACE.getByName(id, LOCATION) as unknown as WorkspaceApi };
-    // GitHub imports run in the new workspace's Durable Object, step by step from its alarm.
-    const imports: ImportScheduler = { start: (s) => env.WORKSPACE.getByName(s.id, LOCATION).startImport(s) };
-    const repos = new RepoService(store, rooms, requestDb, host, imports);
-    const ctx: Ctx = { store, rooms, repos };
-    // MCP and agents' commands (/mcp, POST /app/<id>) run in ShellDOs: routed before createApp, which only answers
-    // their refusals (not signed in, cross-origin) and so never touches these.
-    const shells = null as unknown as ShellSessions;
-    const mcpServer = null as unknown as McpServer;
-    app = { app: createApp({ ctx, db: requestDb, shells, mcpServer, staticFile: (req) => assets(req, env) }), ctx };
+    const repos = new RepoService(requestDb, host);
+    const ctx: Ctx = { repos };
+    app = { app: createApp({ ctx, db: requestDb, mcpServer: new McpServer(ctx), staticFile: (req) => assets(req, env) }), ctx };
     return app;
   }
 
@@ -197,10 +133,7 @@ export function createRouter(opts: RouterOptions = {}) {
         // demo rooms are admitted through the demo's lobby (src/server/demo-rooms.ts)
         useWorkersDemoGate(env);
         if (p === "/ws") return withServerTiming(await note(req, url, env), isolate);
-        const agentWs = req.method === "POST" ? agentWorkspace(p) : null;
-        if (agentWs !== null) return await agentCommand(req, env, agentWs);
-        if (p === "/mcp") return await mcp(req, env);
-        if (p.startsWith("/api/")) return withTiming(timed(await api(req, url, env, ec), started), isolate);
+        if (p.startsWith("/api/")) return withTiming(timed((await setup(env).app.fetch(req, noUpgrade))!, started), isolate);
         const res = await setup(env).app.fetch(req, noUpgrade);
         return res ?? new Response("Not found", { status: 404 });
       } catch (e) {
@@ -223,64 +156,7 @@ export function createRouter(opts: RouterOptions = {}) {
     return new Response(req.method === "HEAD" ? null : html, { status: 200, headers });
   }
 
-  /** /api/*: the shared app, with GET …/raw?ref=<sha> answered from the cache when it can be. */
-  async function api(req: Request, url: URL, env: Env, ec: ExecutionContext): Promise<Response> {
-    const { app } = setup(env);
-    const ref = url.searchParams.get("ref");
-    const cacheable = req.method === "GET" && RAW_PATH.test(url.pathname) && !!ref && SHA.test(ref);
-    if (!cacheable) return (await app.fetch(req, noUpgrade))!;
-    // Raw reads are public (anyone may read), so the key is only what selects the bytes: repo, path and commit.
-    const key = new Request(`${url.origin}${url.pathname}?path=${encodeURIComponent(url.searchParams.get("path") ?? "")}&ref=${ref}`);
-    const cache = (caches as unknown as { default: Cache }).default;
-    const hit = await cache.match(key);
-    if (hit) return withTiming(hit, "cache;desc=hit");
-    const res = (await app.fetch(req, noUpgrade))!;
-    if (res.status !== 200) return res;
-    const out = new Response(res.body, res);
-    out.headers.set("cache-control", `public, max-age=${RAW_CACHE_SECONDS}, immutable`);
-    ec.waitUntil(cache.put(key, out.clone()));
-    return withTiming(out, "cache;desc=miss");
-  }
-
-  /**
-   * POST /app/<id>: the caller (a bearer token's account, else anonymous) continues in a ShellDO, named in a header: the
-   * account's own (as for /mcp), or the workspace's for anonymous callers. The object checks the workspace, rate-limits
-   * and runs the shell, so one object sees every call its limits count.
-   */
-  async function agentCommand(req: Request, env: Env, workspace: string): Promise<Response> {
-    setup(env);
-    const caller = await agentCaller(current().db, req);
-    if (caller instanceof Response) return caller;
-    const headers = new Headers(req.headers);
-    headers.set(AGENT_CALLER_HEADER, encodeURIComponent(JSON.stringify(caller)));
-    return env.SHELL.getByName(agentShellName(caller, workspace), LOCATION).fetch(await buffered(req, headers));
-  }
-
-  /** /mcp: the caller (an app token, or sign-in off's MCP visitor) continues in its own ShellDO, named in a header. */
-  async function mcp(req: Request, env: Env): Promise<Response> {
-    const { app } = setup(env);
-    const t = new Timing();
-    const c = await t.time("caller", () => app.mcpCaller(req));
-    // Not signed in, cross-origin, a CORS preflight: answered here, before any shell.
-    if (c instanceof Response) return withServerTiming(c, t.header());
-    const headers = new Headers(req.headers);
-    headers.set(SHELL_CALLER_HEADER, encodeURIComponent(JSON.stringify(c satisfies ShellCaller)));
-    const res = await t.time("shell", async () => env.SHELL.getByName(userShellName(c.caller.userId), LOCATION).fetch(await buffered(req, headers)));
-    return withServerTiming(res, t.header());
-  }
-
   return { fetch };
-}
-
-/**
- * The request with its body read in full (commands are small; ShellDOs read at most 1 MB), for forwarding to a
- * ShellDO. Forwarding the client's stream as is breaks when the object answers without reading it (a 429, a 404):
- * workerd then fails pumping the rest ("Can't read from request stream after response has been sent") and drops
- * the connection, and under wrangler dev the whole process can go down. The signal still reaches the object.
- */
-async function buffered(req: Request, headers: Headers = req.headers): Promise<Request> {
-  const body = req.method === "GET" || req.method === "HEAD" ? null : await req.arrayBuffer();
-  return new Request(req.url, { method: req.method, headers, body, signal: req.signal });
 }
 
 let signInChecked: { problem: string | null } | null = null;
@@ -293,9 +169,6 @@ function signInCheck(): string | null {
   }
   return signInChecked.problem;
 }
-
-/** How long the Worker trusts a cached head (the WorkspaceDOs commit; the Worker never hears of it). */
-export const WORKER_HEAD_MAX_AGE_MS = 2000;
 
 /** This isolate's first request (Date.now() is 0 at startup) and how many it has served: new isolates have empty caches. */
 let isolateFirst = 0;

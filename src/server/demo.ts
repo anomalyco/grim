@@ -1,32 +1,25 @@
 // The demo: public workspaces anyone can edit, one per demo room ("demo.<room>", demo-rooms.ts: at most 10 people
-// each; "demo" itself is only the alias clients resolve). Each is kept only in memory (a MemoryStore with a size
-// budget), seeded with a short tour when the room is made and reset to it every DEMO_RESET_MINUTES (default 15).
-// Nobody owns them, so nobody can remove them; their rooms keep no crash log. Bun keeps each room's store in the
-// server process (index.ts); Workers keep each room in its own WorkspaceDO (src/workers/demo.ts).
+// each; "demo" itself is only the alias clients resolve). Each has its own NoteStore (an in-memory SQLite on Bun, its
+// WorkspaceDO's own on Workers) with size limits, seeded with a short tour when the room is made and reset to it
+// every DEMO_RESET_MINUTES (default 15). Nobody owns them, so nobody can remove them.
 import { config } from "./config.ts";
 import { BANNER_WEBP_BASE64 } from "./demo-banner.ts";
 import { isDemoRoom } from "./demo-rooms.ts";
 import { demoResetPhrase } from "../shared/demo.ts";
 import { emit } from "./events.ts";
-import type { Ctx } from "./ops.ts";
 import type { Db } from "./seams/db.ts";
-import { MemoryStore, type MemoryLimits } from "./store/memory.ts";
-import type { GitStore } from "./store/types.ts";
+import type { WorkspaceRuntime } from "./workspace.ts";
+import type { RepoRow } from "./repos.ts";
 
 export const DEMO_ID = "demo";
 export { isDemoRoom };
 export const DEMO_FULL = `The demo is full — it resets ${demoResetPhrase(config.demoResetMinutes)}`;
 
-export const demoLimits: MemoryLimits = {
+export const demoLimits = {
   noteBytes: 1024 * 1024,
   imageBytes: 2 * 1024 * 1024,
   imagesBytes: 10 * 1024 * 1024,
-  totalBytes: 20 * 1024 * 1024,
-  commits: 200,
-  fullMessage: DEMO_FULL,
 };
-
-export const newDemoStore = () => new MemoryStore(demoLimits);
 
 const WELCOME = `# Welcome to the demo
 
@@ -35,15 +28,15 @@ Grim is a notepad for people and agents. This is a playground: **anyone in it ca
 ![A many-eyed ink creature peers over an open notebook, writing a to-do list, while a little cursor robot sits on the page beside claw scratches](images/banner.webp)
 
 ## Agents
-Agents edit the same notes as people, through a bash shell over the workspace, and you see their cursor as they write.
+Agents edit the same notes as people, through a bash shell over one note at a time, and you see their cursor as they write.
 
 ### Share with an agent
 Signed in, the **Share with an agent** card at the bottom of the sidebar has a **Share** button. Its **Copy prompt** copies a prompt with the open workspace's URL; paste it to your agent (Claude, Codex, …). The same URL people open is the agent's way in:
 
 - a GET returns instructions
-- each POST runs a shell command (\`ls\`, \`cat\`, \`grep\`, \`echo … >> note.md\`, \`git log\`)
+- each POST to a note's URL runs a shell command on that one note (\`cat\`, \`grep\`, \`sed -i\`, \`echo … >> note.md\`, \`history\`)
 
-Its edits show up live here, with its own cursor, and are committed like yours.
+Its edits show up live here, with its own cursor, and each command becomes a version of its own.
 
 ## Try the Markdown
 Type and it renders as you go: **bold**, *italic*, ~~strike~~, ==highlight==, \`inline code\` and [links](https://example.com).
@@ -65,7 +58,7 @@ function greet(name: string) {
 }
 \`\`\`
 
-> Every edit is committed to this workspace's history a few seconds after you stop typing. Open **History** to see it.
+> Edits become versions in the note's history after a few minutes of quiet (an agent's right away). Open **History** to see them.
 
 More in the [tour folder](tour/Markdown%20cheatsheet.md).
 `;
@@ -102,7 +95,7 @@ export const DEMO_SEED: Array<{ path: string; content: string | Uint8Array }> = 
 
 /** A demo room's workspace row (made with the room, deleted when it goes). Nobody owns it, so nobody can remove it. */
 export async function createDemoRoomRow(db: Db, id: string) {
-  await db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, 'Demo', 'notes', ?, 'ready', ?) ON CONFLICT (id) DO NOTHING", id, config.defaultBranch, Date.now());
+  await db.run("INSERT INTO repos (id, title, kind, branch, status, created_at) VALUES (?, 'Demo', 'notes', 'main', 'ready', ?) ON CONFLICT (id) DO NOTHING", id, Date.now());
 }
 
 /** A demo room's row goes (its joins with it). */
@@ -116,33 +109,22 @@ export async function deleteStaleDemoRows(db: Db, live: Set<string>) {
   for (const { id } of rows) if (id === DEMO_ID || (isDemoRoom(id) && !live.has(id))) await deleteDemoRoomRow(db, id);
 }
 
-/** A demo room's repo wiped and recreated in `store` with the seed as its only commit. */
-export async function seedDemoRepo(store: GitStore, repo: string, branch = config.defaultBranch) {
-  await store.deleteRepo(repo);
-  await store.createRepo(repo, { branch });
-  const res = await store.commit({
-    repo,
-    branch,
-    expectedHead: null,
-    changes: DEMO_SEED,
-    message: "Start the demo",
-    author: { name: "Grim", email: "grimoire@users.noreply.code.storage" },
-  });
-  if (!res.ok) throw new Error("couldn't seed the demo");
-}
-
-/** A room back to the seed: its open rooms are thrown away (clients reconnect and reload), the repo reseeded. */
-export async function resetDemo(ctx: Ctx, repo: string) {
-  await seedDemoRepo(ctx.store, repo);
-  await ctx.rooms.discardRepo(repo);
-  emit({ type: "tree", repo });
+/** A demo room's workspace back to the seed: rooms thrown away (clients reconnect: a new epoch), notes reseeded. */
+export async function seedDemo(rt: WorkspaceRuntime) {
+  await rt.rooms.discardRepo(rt.id);
+  rt.store.wipe();
+  const row: RepoRow = { id: rt.id, title: "Demo", kind: "notes", read_only: 0, status: "ready", error: null, created_by: null, created_at: 0, owner_id: null };
+  const notes = DEMO_SEED.filter((f) => typeof f.content === "string").map((f) => ({ path: f.path, text: f.content as string, versions: [] }));
+  const images = DEMO_SEED.filter((f) => typeof f.content !== "string").map((f) => ({ path: f.path, base64: Buffer.from(f.content as Uint8Array).toString("base64") }));
+  await rt.importNotes(row, notes, images);
+  emit({ type: "tree", repo: rt.id });
 }
 
 /** Reset every room of the demo (`rooms()`) every `minutes` (DEMO_RESET_MINUTES); returns the stop function. */
-export function startDemoResets(ctx: Ctx, rooms: () => string[], minutes = config.demoResetMinutes): () => void {
+export function startDemoResets(runtime: (id: string) => WorkspaceRuntime, rooms: () => string[], minutes = config.demoResetMinutes): () => void {
   if (!(minutes > 0)) return () => {};
   const t = setInterval(() => {
-    for (const id of rooms()) void resetDemo(ctx, id).catch((e) => console.error(`[demo] reset ${id} failed:`, e));
+    for (const id of rooms()) void seedDemo(runtime(id)).catch((e) => console.error(`[demo] reset ${id} failed:`, e));
   }, minutes * 60_000);
   return () => clearInterval(t);
 }

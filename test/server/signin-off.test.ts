@@ -11,7 +11,6 @@ const { db } = await import("../../src/server/db.ts");
 const restore = isolate(config, db);
 Object.assign(config, { storage: "local", allowDevLogin: true, signIn: false, signInSetting: "", quietMs: 100 });
 config.github.clientId = "";
-config.github.appSlug = "";
 config.google.clientId = "";
 config.google.clientSecret = "";
 const { startServer } = await import("../../src/server/index.ts");

@@ -18,7 +18,6 @@ import { MAC_DOWNLOAD_ASSET, MAC_DOWNLOAD_PATH } from "../shared/mac-download.ts
 import type { Participant } from "./rooms.ts";
 import type { AdmittedWorkspace, WsDecision, WsReject } from "./seams/workspace-host.ts";
 import type { AdmittedSocket } from "./wsmux.ts";
-import type { ShellSessions } from "./shell/session.ts";
 import { metric, metricsHit } from "./metrics.ts";
 import { handleAdmin, isAdminPath } from "./admin-stats.ts";
 import { newAccount } from "./personal.ts";
@@ -43,7 +42,6 @@ export interface AppDeps {
   ctx: Ctx;
   /** The global tables (users, sessions, workspaces, …): bun:sqlite on Bun, D1 on Workers. */
   db: Db;
-  shells: ShellSessions;
   mcpServer: McpServer;
   /**
    * Everything else a GET/HEAD may ask for: old /r/… and /start links, the app's HTML (/, /app/…, /scratch), versioned
@@ -60,7 +58,7 @@ export async function admitWorkspace(db: Db, req: Request, url: URL, opts: { def
   const path = cleanPath(url.searchParams.get("path") ?? "");
   const a = await admit(db, req, url, opts, (repo) => (!path ? { code: 4404, reason: "not found" } : repo.status !== "ready" ? { code: 1013, reason: `repo ${repo.status}` } : null));
   if ("reject" in a) return a;
-  return { repoId: a.repo.id, branch: a.repo.branch, path: path!, participant: a.participant, readOnly: a.readOnly };
+  return { repoId: a.repo.id, path: path!, participant: a.participant, readOnly: a.readOnly };
 }
 
 /**
@@ -72,7 +70,7 @@ export async function admitSocket(db: Db, req: Request, url: URL, opts: { defer?
   if ("reject" in a) return a;
   const { repo } = a;
   const status = repo.status === "importing" || repo.status === "error" ? repo.status : "ready";
-  return { v: 2, repoId: repo.id, branch: repo.branch, status, ...(repo.error ? { error: repo.error } : {}), participant: a.participant, readOnly: a.readOnly };
+  return { v: 2, repoId: repo.id, status, ...(repo.error ? { error: repo.error } : {}), participant: a.participant, readOnly: a.readOnly };
 }
 
 async function admit(
@@ -148,7 +146,7 @@ const MCP_CORS = {
 };
 
 export function createApp(deps: AppDeps) {
-  const { ctx, db, shells, mcpServer } = deps;
+  const { ctx, db, mcpServer } = deps;
 
   async function admitWs(req: Request, url: URL): Promise<WsDecision> {
     const a = await admitWorkspace(db, req, url);
@@ -217,10 +215,10 @@ export function createApp(deps: AppDeps) {
       if (p.startsWith("/.well-known/oauth-") || p.startsWith("/oauth/")) return (await handleOAuth(db, req, url)) ?? new Response("Not found", { status: 404 });
       // the agent links that were (/a/<uuid>): the workspace URL is the agent's address now
       if (p.startsWith("/a/")) return goneAgentLink();
-      // an agent's command on a workspace URL (agent-url.ts)
+      // an agent's command on a note URL (agent-url.ts)
       if (req.method === "POST" && isNoteUrl(p)) {
         const caller = await agentCaller(db, req);
-        return caller instanceof Response ? caller : await handleAgentPost(req, url, ctx, shells, caller);
+        return caller instanceof Response ? caller : await handleAgentPost(req, url, ctx, caller);
       }
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
       if (p === MAC_DOWNLOAD_PATH) {

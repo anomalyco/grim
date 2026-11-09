@@ -2,26 +2,22 @@ import { join, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { config } from "./config.ts";
 import { githubLoginEnabled, signInProblem } from "./auth.ts";
-import { assertTestStorage, devLoginEnabled } from "./config.ts";
+import { devLoginEnabled } from "./config.ts";
 import { googleLoginEnabled } from "./google.ts";
-import { githubGitUrl } from "./github.ts";
 import { McpServer } from "./mcp.ts";
 import type { Ctx } from "./ops.ts";
 import { RepoService } from "./repos.ts";
 import { notePeer } from "./proxy.ts";
 import { RoomManager, type Conn, type Participant, type Room } from "./rooms.ts";
-import { ShellSessions } from "./shell/session.ts";
-import { CodeStorageStore } from "./store/codestorage.ts";
-import { LocalGitStore } from "./store/localgit.ts";
-import { RoutedStore } from "./store/routed.ts";
-import { CachedHeadStore, repoHeadWriter } from "./store/cached-head.ts";
 import { bunDb } from "./bun/db-bun.ts";
 import { repoCacheDb } from "./repo-cache.ts";
 import { bunRoomStorage } from "./bun/room-storage-bun.ts";
 import { LocalWorkspaceHost } from "./bun/workspace-host-local.ts";
 import { isDemoRoom } from "./demo-rooms.ts";
 import { BunDemoRooms } from "./bun/demo-rooms-bun.ts";
-import type { GitStore } from "./store/types.ts";
+import { NoteStore } from "./notes/store.ts";
+import { FsBlobs } from "./bun/blobs-fs.ts";
+import { mkdir, writeFile } from "node:fs/promises";
 import { staticResponse } from "./assets.ts";
 import { createApp, type Upgrader } from "./app.ts";
 import { setWsProtocols } from "./api.ts";
@@ -49,40 +45,45 @@ async function staticAsset(req: Request, url: URL): Promise<Response> {
 }
 
 export async function startServer(opts: { port?: number; quiet?: boolean } = {}) {
-  assertTestStorage();
   const problem = signInProblem();
   if (problem) throw new Error(problem);
-  const base: GitStore =
-    config.storage === "codestorage"
-      ? new CodeStorageStore({
-          org: config.codeStorage.org,
-          key: config.codeStorage.key,
-          apiBaseUrl: config.codeStorage.apiBaseUrl,
-          storageBaseUrl: config.codeStorage.storageBaseUrl,
-          repoPrefix: config.codeStorage.repoPrefix,
-        })
-      : new LocalGitStore(join(config.dataDir, "git"), githubGitUrl);
   // Workspace rows are cached only with REPO_CACHE=1 (repo-cache.ts); otherwise every read goes to the Db.
   const db = repoCacheDb(bunDb());
-  // the demo's rooms live in memory (bun/demo-rooms-bun.ts); every other folder in the configured store. Branch heads are cached in front
-  // of both (everything reads and commits through this one store).
-  // Changed heads are recorded in repos.head (throttled), so the workspace list doesn't ask the store.
-  const headWriter = repoHeadWriter(db);
+  // every workspace's notes in grimoire.sqlite; the demo's rooms each in an in-memory database (bun/demo-rooms-bun.ts)
+  const storage = bunRoomStorage();
   const demo = new BunDemoRooms(db);
-  const store = new CachedHeadStore(new RoutedStore(base, demo.storeFor), { onHeadChange: headWriter });
-  const rooms = new RoomManager(store, { ephemeral: isDemoRoom, storage: bunRoomStorage(), db });
-  const host = new LocalWorkspaceHost(store, rooms);
-  const repos = new RepoService(store, rooms, db, host);
-  const ctx: Ctx = { store, rooms, repos };
-  const shells = new ShellSessions(ctx);
-  const mcpServer = new McpServer(shells, ctx);
+  const stores = new Map<string, NoteStore>();
+  const storeFor = (repo: string) => {
+    if (isDemoRoom(repo)) return demo.storeFor(repo);
+    let s = stores.get(repo);
+    if (!s) stores.set(repo, (s = new NoteStore(storage, repo)));
+    return s;
+  };
+  const rooms = new RoomManager({ store: storeFor });
+  const blobs = new FsBlobs(join(config.dataDir, "blobs"));
+  const host = new LocalWorkspaceHost(rooms, (id) => (isDemoRoom(id) ? demo.blobsFor(id) : blobs));
+  const repos = new RepoService(db, host);
+  const ctx: Ctx = { repos };
+  const mcpServer = new McpServer(ctx);
 
-  await repos.enforceGitHubReadOnly();
-  await demo.start(ctx);
-  const branches = new Map((await repos.list()).map((r) => [r.id, r.branch]));
-  await host.recover((id) => branches.get(id));
-  const stopPolling = repos.startPolling();
-  const app = createApp({ ctx, db, shells, mcpServer, staticFile: staticAsset });
+  await demo.start(host);
+  host.startSweeps(storage, () => [...demo.stores.keys()]);
+  // a nightly export of every workspace to $DATA_DIR/backups (docs/storage-v2.md §11)
+  const backups = setInterval(() => void backupAll(), 24 * 60 * 60_000);
+  async function backupAll() {
+    const day = new Date().toISOString().slice(0, 10);
+    for (const r of await repos.list().catch(() => [])) {
+      if (isDemoRoom(r.id) || r.status !== "ready") continue;
+      try {
+        const dir = join(config.dataDir, "backups", r.id);
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, `${day}.zip`), await host.get(r.id).exportZip(r));
+      } catch (e) {
+        console.error(`[backup] ${r.id}:`, e);
+      }
+    }
+  }
+  const app = createApp({ ctx, db, mcpServer, staticFile: staticAsset });
   // protocol v2 (one socket per workspace) next to v1 (one per note)
   setWsProtocols([1, 2]);
 
@@ -185,7 +186,7 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
 
   if (!opts.quiet) {
     console.log(
-      `grimoire listening on ${config.publicUrl} (port ${server.port}) · storage: ${store.kind} · sign-in: ${config.signIn ? "on" : "off (no accounts: everyone can do everything)"} · Google: ${googleLoginEnabled() ? "on" : "off"} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · test sign-in (/auth/dev): ${devLoginEnabled() ? "on" : "off"}`,
+      `grimoire listening on ${config.publicUrl} (port ${server.port}) · sign-in: ${config.signIn ? "on" : "off (no accounts: everyone can do everything)"} · Google: ${googleLoginEnabled() ? "on" : "off"} · GitHub login: ${githubLoginEnabled() ? "on" : "off"} · test sign-in (/auth/dev): ${devLoginEnabled() ? "on" : "off"}`,
     );
   }
 
@@ -193,16 +194,14 @@ export async function startServer(opts: { port?: number; quiet?: boolean } = {})
   async function stop() {
     if (stopped) return;
     stopped = true;
-    stopPolling();
+    clearInterval(backups);
     demo.stop();
-    shells.stop();
     host.closeSockets(CLOSE.restart, "server restarting");
     server.stop(true);
     await host.flushAll();
-    await headWriter.flush();
   }
 
-  return { server, ctx, shells, demo, stop };
+  return { server, ctx, demo, host, stop };
 }
 
 if (import.meta.main) {
@@ -213,7 +212,7 @@ if (import.meta.main) {
   }
   const { stop } = await startServer();
   const shutdown = async (sig: string) => {
-    console.log(`${sig}: saving open files…`);
+    console.log(`${sig}: saving open notes…`);
     await stop().catch((e) => console.error("shutdown:", e));
     process.exit(0);
   };

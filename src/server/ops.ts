@@ -1,16 +1,16 @@
 // File operations shared by the HTTP API and the agent shell, so people and agents get identical behavior. They run
 // in the workspace's runtime (workspace.ts), reached through the WorkspaceHost (in-process on Bun, a Durable Object
 // on Workers); this module keeps the path/image helpers and the (ctx, repo, …) entry points the callers use.
-import type { Participant, RoomManager } from "./rooms.ts";
+import type { Participant } from "./rooms.ts";
 import { cleanPath, type RepoRow, type RepoService } from "./repos.ts";
-import type { GitStore } from "./store/types.ts";
 import { sha256 } from "./ids.ts";
 
 export interface Ctx {
-  store: GitStore;
-  rooms: RoomManager;
   repos: RepoService;
 }
+
+/** Largest note (UTF-8 bytes). */
+export const MAX_NOTE_BYTES = 5 * 1024 * 1024;
 
 export class OpError extends Error {
   override name = "OpError";
@@ -41,8 +41,6 @@ export function writable(repo: RepoRow) {
   if (repo.read_only) throw new OpError(403, `${repo.id} is read-only`);
   if (repo.status !== "ready") throw new OpError(409, `${repo.id} is ${repo.status}`);
 }
-
-export const SAFE_REF = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,128}$/;
 
 /** Image files served raw (to show images in notes), by extension. */
 export const IMAGE_TYPES: Record<string, string> = {
@@ -154,12 +152,11 @@ const ws = (ctx: Ctx, repo: RepoRow) => ctx.repos.host.get(repo.id);
 
 export const readFile = (ctx: Ctx, repo: RepoRow, p: string, ref?: string) => ws(ctx, repo).readFile(repo, p, ref);
 
-/** An image file's bytes at `ref` (default: the branch tip). */
-export const readRaw = (ctx: Ctx, repo: RepoRow, p: string, ref?: string) => ws(ctx, repo).readRaw(repo, p, ref);
+/** An image's bytes. */
+export const readRaw = (ctx: Ctx, repo: RepoRow, p: string) => ws(ctx, repo).readRaw(repo, p);
 
 /**
- * Store an uploaded image in `images/` next to note `notePath`, committed at once by `actor`; an identical file
- * already there is reused. Returns the repo path and the Markdown that shows it in the note.
+ * Store an uploaded image in `images/` next to note `notePath`; an identical file already there is reused. Returns the repo path and the Markdown that shows it in the note.
  */
 export const uploadImage = (ctx: Ctx, repo: RepoRow, notePath: string, filename: string, bytes: Uint8Array, actor: Participant) =>
   ws(ctx, repo).uploadImage(repo, notePath, filename, bytes, actor);
@@ -176,14 +173,14 @@ export const restoreFile = (ctx: Ctx, repo: RepoRow, p: string, sha: string, act
 
 export const deleteFile = (ctx: Ctx, repo: RepoRow, p: string, actor: Participant) => ws(ctx, repo).deleteFile(repo, p, actor);
 
-/** Rename a note (one commit); renames in a workspace run one at a time. */
+/** Rename a note; renames in a workspace run one at a time. */
 export const renameFile = (ctx: Ctx, repo: RepoRow, from: string, to: string, actor: Participant, opts: { ifUntitled?: boolean } = {}) =>
   ws(ctx, repo).renameFile(repo, from, to, actor, opts);
 
-/** Rename folder `from` to `to`: every file under it moves, in one commit. */
+/** Rename folder `from` to `to`: every note and image under it moves. */
 export const renameFolder = (ctx: Ctx, repo: RepoRow, from: string, to: string, actor: Participant) => ws(ctx, repo).renameFolder(repo, from, to, actor);
 
-/** Delete folder `dir` and everything under it, in one commit. */
+/** Delete folder `dir` and everything under it. */
 export const deleteFolder = (ctx: Ctx, repo: RepoRow, dir: string, actor: Participant) => ws(ctx, repo).deleteFolder(repo, dir, actor);
 
 export const history = (ctx: Ctx, repo: RepoRow, p: string | undefined, limit = 50) => ws(ctx, repo).history(repo, p, limit);

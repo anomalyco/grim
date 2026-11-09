@@ -5,12 +5,12 @@
   // Must be ≤ the pinned workerd's newest supported date (workerd 1.20260811.1 → 2026-08-18)
   // and ≥ 2026-04-21 (enhanced_error_serialization keeps error names across RPC).
   "compatibility_date": "2026-08-18",
-  // enable_request_signal: share-link and MCP commands stop when their caller goes away (req.signal reaches the ShellDO).
+  // enable_request_signal: an agent's command stops when its caller goes away.
   "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   // Bun-only modules the shared code imports, swapped for their Workers versions or stand-ins (src/workers/stubs.ts).
   // Keys are import specifiers as written; values are resolved from the project root.
   "alias": {
-    "./trust.ts": "./src/server/shell/trust.workers.ts",
+    "./trust.ts": "./src/server/notes/trust.workers.ts",
     // until config.ts stops importing node:fs
     "node:fs": "./src/workers/stubs.ts"
   },
@@ -30,7 +30,7 @@
     "run_worker_first": ["/", "/app", "/scratch", "/app/*", "/api/*", "/ws*", "/auth/*", "/a/*", "/mcp", "/oauth/*", "/.well-known/oauth-*", "/download/*", "/admin/*"]
   },
   // Production (`wrangler deploy`, CF-36): Worker grim at https://grimnotes.app. Secrets (wrangler secret put …):
-  // CODE_STORAGE_ORG, CODE_STORAGE_PRIVATE_KEY, GOOGLE_CLIENT_SECRET. Local `wrangler dev` overrides the
+  // GOOGLE_CLIENT_SECRET. Notes live in each WorkspaceDO's SQLite (docs/storage-v2.md); images and nightly exports in R2. Local `wrangler dev` overrides the
   // production-only vars (bun run dev:workers, scripts/wrangler-dev.ts; docs/06-cloudflare.md).
   // Workers Custom Domain; with routes set, wrangler turns the workers.dev URL off (one public origin)
   "routes": [{ "pattern": "grimnotes.app", "custom_domain": true }],
@@ -44,13 +44,8 @@
     // workspace rows read by id cached per isolate for 10 s (src/server/repo-cache.ts)
     "REPO_CACHE": "1",
     "PUBLIC_URL": "https://grimnotes.app",
-    "STORAGE": "codestorage",
-    // production's Code Storage repos are "app-<workspace>" (staging's "stg-", the old Bun site's unprefixed)
-    "CODE_STORAGE_REPO_PREFIX": "app-",
     // accounts on (docs/self-hosting.md "Sign-in"): Google sign-in, guests only read and edit; off is the default
     "SIGN_IN": "on",
-    // adding GitHub repos as read-only workspaces, and their refresh on the */5 cron: off for now (docs/self-hosting.md)
-    "GITHUB_COPIES": "off",
     // Google sign-in (OAuth client "web" in Google Cloud project abattoir-512615; redirect ${PUBLIC_URL}/auth/google/callback).
     // The secret: wrangler secret put GOOGLE_CLIENT_SECRET
     "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com",
@@ -67,31 +62,34 @@
       "migrations_dir": "migrations"
     }
   ],
+  // images (content-addressed, "<workspace>/<sha256>") and nightly exports ("backups/<workspace>/<date>.zip")
+  "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "grim-images" }],
   "durable_objects": {
     "bindings": [
       { "name": "WORKSPACE", "class_name": "WorkspaceDO" },
-      { "name": "SHELL", "class_name": "ShellDO" },
       { "name": "HOME", "class_name": "HomeDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["WorkspaceDO", "HubDO", "ShellDO", "HomeDO"] },
     // HubDO fed /api/events (SSE), which is gone: its objects are deleted
-    { "tag": "v2", "deleted_classes": ["HubDO"] }
+    { "tag": "v2", "deleted_classes": ["HubDO"] },
+    // ShellDO ran the multi-file agent shell; the note shell runs in the WorkspaceDO (docs/storage-v2.md)
+    { "tag": "v3", "deleted_classes": ["ShellDO"] }
   ],
-  // src/workers/cron.ts: read-only GitHub copies refreshed every 5 minutes, and the demo reset on the 5-minute tick that
-  // crosses a DEMO_RESET_MINUTES boundary; session pruning every 6 hours
+  // src/workers/cron.ts: the demo reset on the 5-minute tick that crosses a DEMO_RESET_MINUTES boundary; session
+  // pruning every 6 hours; every workspace's export to R2 nightly
   "triggers": {
-    "crons": ["*/5 * * * *", "0 */6 * * *"]
+    "crons": ["*/5 * * * *", "0 */6 * * *", "0 3 * * *"]
   },
   "observability": {
     "enabled": true,
     "logs": { "invocation_logs": false }
   },
   "env": {
-    // `wrangler deploy --env staging` (CF-34): its own Worker and D1; Code Storage repos are "stg-<workspace>" in the
-    // org it shares with production. Secrets (wrangler secret put … --env staging): CODE_STORAGE_ORG,
-    // CODE_STORAGE_PRIVATE_KEY, GOOGLE_CLIENT_SECRET. Vars, D1 and Durable Object bindings aren't inherited, so they're repeated here.
+    // `wrangler deploy --env staging` (CF-34): its own Worker, D1 and R2 bucket. Secrets (wrangler secret put …
+    // --env staging): GOOGLE_CLIENT_SECRET, IMPORT_TOKEN (the storage-v2 import). Vars, D1, R2 and Durable Object
+    // bindings aren't inherited, so they're repeated here.
     "staging": {
       "name": "grim-staging",
       // Workers Custom Domain; with routes set, wrangler turns the workers.dev URL off (one public origin)
@@ -102,10 +100,7 @@
         "AUTH_CACHE": "1",
         "REPO_CACHE": "1",
         "PUBLIC_URL": "https://staging.grimnotes.app",
-        "STORAGE": "codestorage",
-        "CODE_STORAGE_REPO_PREFIX": "stg-",
         "SIGN_IN": "on",
-        "GITHUB_COPIES": "off",
         // the same Google OAuth client as production (secret: wrangler secret put GOOGLE_CLIENT_SECRET --env staging)
         "GOOGLE_CLIENT_ID": "110461910085-cabfna9v4khv2vgbnmejt2h94gfb4t0b.apps.googleusercontent.com",
         "DEMO_RESET_MINUTES": "15",
@@ -119,10 +114,10 @@
           "migrations_dir": "migrations"
         }
       ],
+      "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "grim-staging-images" }],
       "durable_objects": {
         "bindings": [
           { "name": "WORKSPACE", "class_name": "WorkspaceDO" },
-              { "name": "SHELL", "class_name": "ShellDO" },
           { "name": "HOME", "class_name": "HomeDO" }
         ]
       }

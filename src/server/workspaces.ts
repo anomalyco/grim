@@ -1,13 +1,11 @@
 // The folders (workspaces) someone has joined: opening a folder while signed in records it, and their switcher
 // lists it until they leave. Every folder is public, so joining grants nothing. See docs/workspaces/SPEC.md.
 // Sign-in off: no lists of anyone's; every workspace is listed for everyone (`listedRows`).
-import { repoAccess } from "./auth.ts";
 import { config } from "./config.ts";
 import { DEMO_ID } from "./demo.ts";
-import { demoGate, isDemoRoom } from "./demo-rooms.ts";
-import { getRepo, listRepoRows, type RepoRow } from "./repos.ts";
+import { isDemoRoom } from "./demo-rooms.ts";
+import { listRepoRows, type RepoRow } from "./repos.ts";
 import type { Db } from "./seams/db.ts";
-import type { AccessFn } from "./shell/fs.ts";
 
 /**
  * (user, workspace) pairs known to be joined, oldest first, so reopening a folder doesn't write to the global
@@ -66,24 +64,4 @@ export async function joinedRows(db: Db, userId: string): Promise<RepoRow[]> {
 export async function listedRows(db: Db, userId: string): Promise<RepoRow[]> {
   if (config.signIn) return joinedRows(db, userId);
   return (await listRepoRows(db)).filter((r) => r.id !== DEMO_ID && !isDemoRoom(r.id));
-}
-
-/**
- * An MCP caller's shell over one workspace (mcp.ts `command`): what anyone may do there (read-only stays read-only),
- * checked again on every call; never "demo" itself, nor a demo room they aren't in.
- */
-export function workspaceAccess(db: Db, userId: string, repoId: string): AccessFn {
-  return Object.assign(
-    async (repo: RepoRow) => {
-      if (repo.id !== repoId || repo.id === DEMO_ID || repo.status !== "ready") return "none" as const;
-      if (isDemoRoom(repo.id) && (await demoGate().roomOf(userId)) !== repo.id) return "none" as const;
-      return repoAccess(repo);
-    },
-    {
-      listed: async () => {
-        const row = await getRepo(db, repoId);
-        return row ? [row] : [];
-      },
-    },
-  );
 }

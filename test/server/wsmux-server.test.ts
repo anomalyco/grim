@@ -14,7 +14,6 @@ const { db } = await import("../../src/server/db.ts");
 const restore = isolate(config, db);
 Object.assign(config, { storage: "local", allowDevLogin: true, signIn: true, quietMs: 60_000 });
 config.github.clientId = "";
-config.github.appSlug = "";
 const { startServer } = await import("../../src/server/index.ts");
 const mux = await import("../../src/shared/wsmux.ts");
 const { emit } = await import("../../src/server/events.ts");
@@ -310,7 +309,7 @@ describe("v2 channels with a v1 client in the room", () => {
     await c.ev.when(() => c.text("b.md") === all);
     await d.ev.when(() => d.text("b.md") === all);
     await v1.ev.when(() => v1.text.toString() === all);
-    expect(app.ctx.rooms.peek(ws, "b.md")!.conns.size).toBe(3);
+    expect(app.host.rooms.peek(ws, "b.md")!.conns.size).toBe(3);
     d.close();
 
     v1.close();
@@ -320,7 +319,7 @@ describe("v2 channels with a v1 client in the room", () => {
     c.control({ t: "close", ch: 1 });
     const reopened = await c.open("a.md");
     expect(reopened.ch).toBe(4);
-    expect(app.ctx.rooms.peek(ws, "a.md")!.conns.size).toBe(1);
+    expect(app.host.rooms.peek(ws, "a.md")!.conns.size).toBe(1);
     c.close();
     await c.ev.when(() => c.closeCode !== null);
   });
@@ -372,7 +371,7 @@ describe("v2 channels with a v1 client in the room", () => {
     expect(again.generation).toBe(first.generation);
     await v1.ev.when(() => v1.text.toString() === "meanwhile\nstart\noffline\n");
     await c2.ev.when(() => c2.text("away.md") === "meanwhile\nstart\noffline\n");
-    expect(app.ctx.rooms.peek(ws, "away.md")!.text.toString()).toBe("meanwhile\nstart\noffline\n");
+    expect(app.host.rooms.peek(ws, "away.md")!.text.toString()).toBe("meanwhile\nstart\noffline\n");
     v1.close();
     c2.close();
   });
@@ -384,7 +383,7 @@ describe("v2 channels with a v1 client in the room", () => {
     const r = await c.open("reset.md");
     const v1 = new V1("reset.md");
     await v1.ev.when(() => v1.text.toString() === "reset\n");
-    await app.ctx.rooms.discardRepo(ws);
+    await app.host.rooms.discardRepo(ws);
     await c.ev.when(() => (c.chCtl.get(r.ch) ?? []).some((m) => m.t === "end"));
     expect(c.chCtl.get(r.ch)!.find((m) => m.t === "end")).toEqual({ t: "end", code: 1013, reason: "reset" });
     await v1.ev.when(() => v1.closeCode !== null);
@@ -404,7 +403,7 @@ describe("v2 channels with a v1 client in the room", () => {
     await welcomed(c);
     const from = watcher.ctl.length;
     const r = await c.open("hid.md", { hidden: true });
-    expect(app.ctx.rooms.peek(ws, "hid.md")!.participants()).toEqual([]);
+    expect(app.host.rooms.peek(ws, "hid.md")!.participants()).toEqual([]);
     c.control({ t: "view", ch: r.ch, hidden: false });
     const shown = await watcher.wait((m) => m.t === "presence" && m.path === "hid.md", from);
     expect(shown.users.map((u: any) => u.name)).toEqual(["Alice"]);
@@ -426,7 +425,7 @@ describe("v2 channels with a v1 client in the room", () => {
     expect(tree.head).toMatch(/^[0-9a-f]{40}$/);
 
     from = c.ctl.length;
-    const room = app.ctx.rooms.peek(ws, "ev.md")!;
+    const room = app.host.rooms.peek(ws, "ev.md")!;
     const applied = new Promise((r) => room.doc.once("update", r));
     c.doc("ev.md").getText("md").insert(0, "x");
     await applied;

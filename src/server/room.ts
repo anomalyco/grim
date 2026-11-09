@@ -1,20 +1,17 @@
+// One open note: its Y.Doc (a merge cache of the note's text, docs/storage-v2.md), awareness, connections, line
+// authors and open version. Everything is persisted in the workspace's NoteStore (notes/store.ts), synchronously:
+// updates are buffered 250 ms per author and written as one row of the note's update tail, then acked; the state is
+// compacted (text, doc, line authors) on version cuts, on close and when the tail grows. The room's generation is
+// "<note id>.<epoch>": stable across closes, hibernation, evictions and deploys, so clients keep their documents.
 import * as Y from "yjs";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
-import { newId } from "./ids.ts";
-import { config } from "./config.ts";
 import { emit, notifyChange } from "./events.ts";
-import { applyDiff } from "./textdiff.ts";
-import type { Author, CommitOutcome, GitStore } from "./store/types.ts";
-import { isErr } from "./errors.ts";
 import type { PresenceState, PresenceUser } from "../shared/presence.ts";
 import { attribute, LineMemory } from "../shared/lineauthors.ts";
-import { linePairs } from "../shared/textdiff.ts";
-import type { RoomStorage } from "./seams/room-storage.ts";
-import type { Db } from "./seams/db.ts";
-import { baseIndex, blameMessage, isBaseLine, originLines, rebase, resolveAuthors, UNKNOWN, type BlameMessage, type LineAuthor, type OriginAuthors } from "./blame.ts";
+import { addContributor, VERSION_IDLE_MS, VERSION_SPAN_MS, versionRef, type Contributor, type LineAuthors, type Note, type NoteStore, type Pending, type Person, type VersionKind } from "./notes/store.ts";
 
 export const MSG_SYNC = 0;
 export const MSG_AWARENESS = 1;
@@ -25,8 +22,7 @@ export const TEXT_NAME = "md";
 /**
  * Who a participant is, always decided by the server from how the request authenticated, never from what a client
  * sends: "human" = a signed-in user (session cookie or app token; the wire name predates the others and clients rely
- * on it), "guest" = an anonymous browser visitor (no account; anon.ts), "agent" = an agent (the agent shell on a workspace URL,
- * /mcp). Everyone may edit (read-only folders aside); the kind shows in presence and in guests' commits.
+ * on it), "guest" = an anonymous browser visitor (no account; anon.ts), "agent" = an agent (the note shell, /mcp).
  */
 export type ParticipantKind = "human" | "guest" | "agent";
 
@@ -49,55 +45,32 @@ export interface Conn {
   hidden?: boolean;
   /** Its awareness states expire after this (v2 channels: 12 min); default AWARENESS_TIMEOUT_MS (30 s). */
   awarenessTimeoutMs?: number;
-  /**
-   * Only v2 channels have it: asks the client to renew its awareness every `ms`. The room calls it with V1_RENEW_MS
-   * while a connection without it (v1, which drops states not renewed in 30 s) is in the room, else RENEW_MS.
-   */
+  /** Only v2 channels have it: asks the client to renew its awareness every `ms`. */
   renew?(ms: number): void;
+  /** Sync frames with document changes received from it, and how many of them were acked (ack after durable write). */
+  received?: number;
+  acked?: number;
 }
 
 export class NotFoundError extends Error {
   override name = "NotFoundError";
 }
 
-/** An agent's write as it was right after it landed (Room.pin), to commit on its own (Room.commitPinned). */
-export interface PinnedWrite {
-  content: string;
-  snap: Y.Snapshot;
-  /** the committed text the write was made on */
-  base: string;
-  author: Author;
-  agentId: string;
-}
+/** A participant as a person of line authors and versions. */
+export const personOf = (p: Participant): Person => ({ id: p.id, name: p.name, email: p.email, kind: p.kind, color: p.color });
 
-/** How a participant signs commits: guests (no account) as "<name> (guest)". */
-export function authorOf(p: Participant): Author {
-  return { name: p.kind === "guest" ? `${p.name} (guest)` : p.name, email: p.email };
-}
-
-const EXTERNAL = Symbol("external");
 const LOAD = Symbol("load");
-
-interface Contributor {
-  id: string;
-  author: Author;
-  edits: number;
-}
 
 /** Agents get awareness client ids above the uint32 range that Yjs clients pick theirs from. */
 const AGENT_ID_BASE = 2 ** 32;
 /** Blame messages go out at most this often while the text changes. */
 export const BLAME_MS = 1000;
-
-/** Someone who changed the text while the room was open (line authors), with how they sign commits. */
-interface Person extends LineAuthor {
-  email: string;
-  gitName: string;
-}
 /** How many awareness client ids one websocket may own (a client may switch docs once on a generation change). */
 const MAX_IDS_PER_CONN = 2;
-/** Updates are buffered this long per room: one merged crash-log row and one line-author pass per burst. */
+/** Updates are buffered this long per room: one tail row, one line-author pass and one ack per burst. */
 export const BATCH_MS = 250;
+/** The tail is compacted once it has this many rows. */
+const COMPACT_ROWS = 500;
 /** Awareness states not renewed for this long are removed (y-protocols' outdatedTimeout). */
 export const AWARENESS_TIMEOUT_MS = 30_000;
 /** Awareness renewal v2 channels are asked for (`renew`) while a v1 connection is in the room, and otherwise (wsmux.ts). */
@@ -107,31 +80,17 @@ export const RENEW_MS = 300_000;
 export const AWARENESS_SWEEP_MS = 3_000;
 /** A room with no connections closes after this long without activity. */
 export const IDLE_CLOSE_MS = 55_000;
+const UNKNOWN = -1;
 
 export interface RoomOptions {
-  /** Close the room by itself 60 s after its last connection leaves (default true: Bun). Workers turn it off and call closeIfIdle(). */
+  /** Close the room by itself after its last connection leaves (default true: Bun). Workers call closeIfIdle(). */
   closeTimer?: boolean;
-  /** Sweep outdated awareness states with the room's own timer while it has any (default true: Bun). Workers turn it off and call sweepAwareness() from the alarm. */
+  /** Sweep outdated awareness states (and cut idle versions) with the room's own timers (default true: Bun). */
   sweepTimer?: boolean;
-  /**
-   * Reopening from a crash log: catch up with the branch after open() returns instead of before (default false:
-   * Bun, where the head is a local read). Workers: a fresh Durable Object has no cached head, and the note's socket
-   * shouldn't wait on a Code Storage round trip for it; whatever landed meanwhile reaches the clients as an update.
-   */
-  catchUpLater?: boolean;
 }
 
-/** What room_meta.state holds besides the base: so wake() needs nothing but the room storage. */
-interface SavedState {
-  inBase: boolean;
-  savedAt: number | null;
-  contributors: Contributor[];
-}
-
-/** Updates of one author not yet in the crash log or the line authors. */
 interface PendingBatch {
   by: number;
-  /** authorId() of the updates' origin */
   who: string | null;
   updates: Uint8Array[];
 }
@@ -142,88 +101,83 @@ export function agentClientId(agentId: string): number {
   return AGENT_ID_BASE + h;
 }
 
+/** The line authors as clients get them (docs/05-v1-architecture.md, "Line authors"). */
+export interface BlameMessage {
+  t: "blame";
+  authors: Array<{ id: string; name: string; kind: ParticipantKind; color: string }>;
+  lines: number[];
+}
+
+export function blameMessage(values: number[], people: Person[]): BlameMessage {
+  const authors: BlameMessage["authors"] = [];
+  const index = new Map<string, number>();
+  const lines = values.map((v) => {
+    const p = v >= 0 ? people[v] : undefined;
+    if (!p) return UNKNOWN;
+    let i = index.get(p.id);
+    if (i === undefined) index.set(p.id, (i = authors.push({ id: p.id, name: p.name, kind: p.kind, color: p.color }) - 1));
+    return i;
+  });
+  return { t: "blame", authors, lines };
+}
+
 export class Room {
   readonly key: string;
-  readonly doc = new Y.Doc({ gc: false });
+  readonly doc = new Y.Doc({ gc: true });
   readonly text = this.doc.getText(TEXT_NAME);
   readonly awareness = new awarenessProtocol.Awareness(this.doc);
   readonly conns = new Set<Conn>();
-  generation = newId();
-  baseCommit: string | null = null;
-  baseContent = "";
-  /** Whether the file exists at baseCommit. */
-  inBase = false;
-  private baseSnapshot = Y.snapshot(this.doc);
-  private contributors = new Map<string, Contributor>();
+  /** "<note id>.<epoch>" once opened. */
+  generation = "";
+  noteId = "";
+  private epoch = 0;
   private quietTimer: ReturnType<typeof setTimeout> | null = null;
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
-  private pending: PendingBatch | null = null;
-  /** Contributors changed since room_meta.state was last written. */
-  private stateDirty = false;
-  /** The next room_updates seq of this room. */
+  private blameTimer: ReturnType<typeof setTimeout> | null = null;
+  private batch: PendingBatch | null = null;
   private nextSeq = 1;
+  private tailRows = 0;
   private lastSweep = Date.now();
-  /** wake() restored a crash log from before room_meta.state, so inBase still has to be checked against the store. */
-  private legacyLog = false;
-  private lock: Promise<unknown> = Promise.resolve();
-  /** Which connection owns each human awareness client id. */
   private owners = new Map<number, Conn>();
   private lastActivity = Date.now();
-  private fullWarned = false;
-  /** A connection without `renew` (v1) is in the room: v2 channels were asked to renew every V1_RENEW_MS. */
   private v1Mix = false;
-  /** Line authors (blame.ts): one value per line of `liveText`. */
+  /** Line authors: one value per line of `liveText`, indexes into `people`. */
   private lineValues: number[] = [UNKNOWN];
   private liveText = "";
-  /**
-   * Who had the line texts edits took away (lineauthors.ts LineHistory): a line whose exact text comes back (undo,
-   * redo, typed back) gets that author again. Saved with the line values (room_meta.blame.history).
-   */
   private history = new LineMemory();
-  /** Everyone who changed the text in this room; lineValues ≥ 0 index into it. */
   private people: Person[] = [];
-  /** The commit whose text the origin lines are lines of, and its Git blame with authors resolved (null until loaded). */
-  private originCommit: string | null = null;
-  private originAuthors: OriginAuthors | null = null;
-  private blameTimer: ReturnType<typeof setTimeout> | null = null;
-  /** The last blame message the connections got (JSON), so unchanged ones aren't sent again. */
   private sentBlame: string | null = null;
-  version = 0;
-  dirty = false;
-  saving = false;
+  /** The open version (edits not cut yet). */
+  private pending: Pending | null = null;
+  /** The newest version's id (the "commit" clients show) and when it was cut. */
+  private lastVersion: number | null = null;
   savedAt: number | null = null;
+  version = 0;
   closed = false;
 
   constructor(
     readonly repo: string,
     readonly path: string,
-    readonly branch: string,
-    private store: GitStore,
-    private storage: RoomStorage,
-    /** The global tables (users: who Git authors are). */
-    private db: Db,
+    private store: NoteStore,
     private onClose: (room: Room) => void,
-    /** Keep nothing in the crash log (the demo folder: it starts from its seed after a restart anyway). */
-    readonly ephemeral = false,
     private opts: RoomOptions = {},
   ) {
     this.key = roomKey(repo, path);
-    if (!ephemeral) ensureRoomTables(storage);
-    // Awareness's own 3 s interval would keep a Durable Object from hibernating: the room sweeps instead (sweepAwareness).
+    // Awareness's own 3 s interval would keep a Durable Object from hibernating: the room sweeps instead.
     clearInterval((this.awareness as unknown as { _checkInterval: ReturnType<typeof setInterval> })._checkInterval);
     (this.awareness as unknown as { _checkInterval: unknown })._checkInterval = undefined;
-    // The server has no local user of its own.
     this.awareness.setLocalState(null);
 
     // Another author's change is about to land: the batch's line authors must be worked out on the text before it.
     this.doc.on("beforeTransaction", (tr: Y.Transaction) => {
-      if (this.pending && this.pending.who !== authorId(tr.origin)) this.flushPending();
+      if (this.batch && this.batch.who !== authorId(tr.origin)) this.flushBatch();
     });
     this.doc.on("update", (update: Uint8Array, origin: unknown) => {
       if (origin === LOAD || this.closed) return;
-      const by = origin === EXTERNAL ? UNKNOWN : this.personIndex((origin as { user?: Participant } | null)?.user);
+      const who = (origin as { user?: Participant } | null)?.user;
+      const by = this.personIndex(who);
       this.buffer(by, authorId(origin), update);
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, MSG_SYNC);
@@ -234,15 +188,7 @@ export class Room {
       this.lastActivity = Date.now();
       notifyChange(this.repo, this.path);
       this.scheduleBlame();
-      if (origin === EXTERNAL) return this.flushPending();
-      const who = (origin as { user?: Participant } | null)?.user;
-      if (who) {
-        const c = this.contributors.get(who.id) ?? { id: who.id, author: authorOf(who), edits: 0 };
-        c.edits++;
-        this.contributors.set(who.id, c);
-        this.stateDirty = true;
-      }
-      this.markDirty();
+      if (who) this.contribute(who);
     });
 
     this.awareness.on("update", ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
@@ -257,276 +203,211 @@ export class Room {
     });
   }
 
-  /** Open the room: from the crash log if it has one (wake(), then catch up with the branch), otherwise from Git. */
-  async open(create: string | null) {
-    if (this.wake()) {
-      if (this.legacyLog) {
-        // a log from before room_meta.state: whether the file exists at the base has to be asked
-        this.inBase = this.baseCommit !== null && (await this.store.readFile(this.repo, this.path, this.baseCommit)) !== null;
-        if (this.closed) return;
-        this.legacyLog = false;
-        this.dirty = this.isDirty();
-        this.saveState();
-      }
-      this.ensureBlame();
-      // Pick up anything that landed in Git while we were down.
-      const catchUp = this.checkRemote()
-        .catch((e) => console.error(`[room ${this.key}] check after recovery failed:`, e))
-        .then(() => {
-          if (this.dirty && !this.closed) this.scheduleFlush();
-        });
-      if (!this.opts.catchUpLater) await catchUp;
-      return;
-    }
-    const head = await this.store.head(this.repo, this.branch);
-    if (this.closed) return;
-    // The file and its Git blame in parallel (the blame is only used if the file exists).
-    const blame = head && !this.cachedBlame(head) ? this.fetchBlame(head) : undefined;
-    const content = head ? await this.store.readFile(this.repo, this.path, head) : null;
-    if (this.closed) return;
-    if (content === null && create === null) throw new NotFoundError(`${this.path} not found`);
-    this.baseCommit = head;
-    this.inBase = content !== null;
-    // For a new file the committed base is "nothing", so the initial text counts as an edit.
-    this.baseContent = content ?? "";
-    this.doc.transact(() => this.text.insert(0, this.baseContent), LOAD);
-    this.baseSnapshot = content === null ? Y.emptySnapshot : Y.snapshot(this.doc);
-    this.liveText = this.baseContent;
-    this.lineValues = originLines(this.baseContent);
-    this.originCommit = content === null ? null : head;
-    this.saveMeta();
-    this.loadBlame(content === null ? undefined : blame);
-    if (content === null && create) {
-      this.doc.transact(() => this.text.insert(0, create), { user: SYSTEM });
-    }
-    this.dirty = this.isDirty();
-    if (this.dirty) this.scheduleFlush();
-  }
-
-  /** @deprecated open() */
-  load(create: string | null) {
-    return this.open(create);
-  }
-
   /**
-   * Restore the room from its crash log, synchronously and with nothing but the room storage (no store, no Db): the
-   * document, base, inBase, dirty, savedAt, generation, contributors, line authors and the resolved origin authors
-   * (from the blame cache). For a Durable Object waking from hibernation; open() uses it too. Call it once, on a
-   * new room. Returns false (and changes nothing) when there is no crash log. If the blame cache missed,
-   * `ensureBlame()` fetches it later.
+   * Load the note (synchronously, from the store only): its doc at the compacted text (built from the text and saved
+   * when the epoch has none yet), the tail replayed with its line authors. Throws NotFoundError when it doesn't exist.
    */
+  open(): void {
+    if (!this.wake()) throw new NotFoundError(`${this.path} not found`);
+  }
+
+  /** open() without throwing: false when the note doesn't exist (a Durable Object waking for a deleted note). */
   wake(): boolean {
-    if (this.ephemeral || this.closed) return false;
-    const meta =
-      this.storage.exec<{ generation: string; base_commit: string | null; base_content: string; base_snapshot: Uint8Array; blame: string | null; blame_people: string | null; state: string | null }>(
-        "SELECT * FROM room_meta WHERE room = ?",
-        this.key,
-      )[0] ?? null;
-    if (!meta) return false;
-    const rows = this.storage.exec<{ seq: number; data: Uint8Array; author: number | null }>("SELECT seq, data, author FROM room_updates WHERE room = ? ORDER BY seq", this.key);
-    this.replay(rows, meta);
-    this.nextSeq = (rows.at(-1)?.seq ?? 0) + 1;
-    this.generation = meta.generation;
-    this.baseCommit = meta.base_commit;
-    this.baseContent = meta.base_content;
-    this.baseSnapshot = Y.decodeSnapshot(new Uint8Array(meta.base_snapshot));
-    let state: SavedState | null = null;
-    try {
-      state = meta.state ? (JSON.parse(meta.state) as SavedState) : null;
-    } catch {
-      state = null;
-    }
-    this.legacyLog = state === null;
-    this.inBase = state ? state.inBase : meta.base_commit !== null;
-    this.savedAt = state?.savedAt ?? null;
-    this.contributors = new Map((state?.contributors ?? []).map((c) => [c.id, c]));
-    this.originAuthors = this.originCommit === null ? { authors: [], lines: [] } : this.cachedBlame(this.originCommit);
-    this.dirty = this.isDirty();
+    if (this.closed) return false;
+    const note = this.store.byPath(this.path);
+    if (!note) return false;
+    this.load(note);
     return true;
   }
 
-  /** Fetch the origin commit's blame if wake() found no cached one (it may hit the store). */
-  ensureBlame() {
-    if (this.originAuthors === null && !this.closed) this.loadBlame();
-  }
-
-  /**
-   * Rebuild the document from the crash log, and its line authors: the first row is the state saveMeta compacted
-   * (with the line values saved alongside it), each later row an update by its `author`.
-   */
-  private replay(rows: Array<{ data: Uint8Array | ArrayBuffer; author: number | null }>, meta: { base_commit: string | null; base_content: string; blame: string | null; blame_people: string | null }) {
-    let saved: { origin: string | null; lines: number[]; history?: Array<[string, number]> } | null = null;
-    try {
-      saved = meta.blame ? JSON.parse(meta.blame) : null;
-      this.people = meta.blame_people ? JSON.parse(meta.blame_people) : [];
-    } catch {
-      saved = null;
-      this.people = [];
+  private load(note: Note) {
+    this.noteId = note.id;
+    this.epoch = note.epoch;
+    this.generation = `${note.id}.${note.epoch}`;
+    const saved = this.store.loadDoc(note.id, note.epoch);
+    if (saved) Y.applyUpdate(this.doc, saved, LOAD);
+    else {
+      this.doc.transact(() => this.text.insert(0, note.text), LOAD);
+      // everyone who opens this epoch must get the same items: the doc is saved before anyone sees it
+      this.store.saveDoc(note.id, note.epoch, Y.encodeStateAsUpdate(this.doc));
     }
-    let values: number[] | null = null;
-    let prev = "";
-    rows.forEach((r, i) => {
+    let text = this.text.toString();
+    if (text !== note.text) {
+      // (never expected: the doc and the text are written together) the text wins
+      console.error(`[room ${this.key}] doc and text differ at load; rebuilding epoch`);
+      this.epoch = this.store.bumpEpoch(note.id);
+      this.generation = `${note.id}.${this.epoch}`;
+      this.doc.transact(() => {
+        this.text.delete(0, this.text.length);
+        this.text.insert(0, note.text);
+      }, LOAD);
+      this.store.saveDoc(note.id, this.epoch, Y.encodeStateAsUpdate(this.doc));
+      text = note.text;
+    }
+    const a = note.authors;
+    this.people = a?.people ?? [];
+    this.lineValues = a && a.lines.length === text.split("\n").length ? a.lines : text.split("\n").map(() => UNKNOWN);
+    this.history = new LineMemory(a?.history ?? []);
+    this.pending = note.pending;
+    this.savedPeople = this.people.length;
+    const last = this.store.latestVersion(note.id);
+    this.lastVersion = last?.id ?? null;
+    this.savedAt = last?.ended_at ?? null;
+    // the tail: each row an update by its author
+    const rows = this.store.tail(note.id, this.epoch);
+    for (const r of rows) {
       Y.applyUpdate(this.doc, new Uint8Array(r.data), LOAD);
       const next = this.text.toString();
-      if (i === 0) {
-        values = saved && saved.lines.length === next.split("\n").length ? saved.lines : null;
-        if (values) this.history = new LineMemory(Array.isArray(saved?.history) ? saved.history : []);
-      } else if (values) {
-        const by = r.author !== null && this.people[r.author] ? r.author : UNKNOWN;
-        values = attribute(prev, next, values, by, by >= 0 ? this.history : undefined);
-      }
-      prev = next;
-    });
-    this.liveText = prev;
-    if (values && saved) {
-      this.lineValues = values;
-      this.originCommit = saved.origin;
-    } else {
-      // a log from before line authors (or one that doesn't add up): Git blame for what's still the base text
-      this.lineValues = rebase(prev.split("\n").map(() => UNKNOWN), prev, meta.base_commit ? meta.base_content : null);
-      this.originCommit = meta.base_commit;
+      const by = r.author !== null && this.people[r.author] ? r.author : UNKNOWN;
+      this.lineValues = attribute(text, next, this.lineValues, by, by >= 0 ? this.history : undefined);
+      text = next;
     }
+    this.liveText = text;
+    this.nextSeq = (rows.at(-1)?.seq ?? 0) + 1;
+    this.tailRows = rows.length;
+    this.scheduleVersion();
   }
 
-  /** The index of `p` in `people` (added, and persisted for the crash log, the first time); unknown for the system. */
   private personIndex(p: Participant | undefined): number {
-    if (!p || p === SYSTEM) return UNKNOWN;
+    if (!p) return UNKNOWN;
     let i = this.people.findIndex((q) => q.id === p.id);
-    if (i < 0) {
-      i = this.people.push({ id: p.id, name: p.name, kind: p.kind, color: p.color, email: p.email, gitName: authorOf(p).name }) - 1;
-      if (!this.ephemeral) this.storage.exec("UPDATE room_meta SET blame_people = ? WHERE room = ?", JSON.stringify(this.people), this.key);
-    } else if (this.people[i]!.name !== p.name || this.people[i]!.color !== p.color) {
-      // a guest renamed themselves (or picked another colour): show the current one
-      this.people[i] = { ...this.people[i]!, name: p.name, color: p.color, gitName: authorOf(p).name };
-    }
+    if (i < 0) i = this.people.push(personOf(p)) - 1;
+    else if (this.people[i]!.name !== p.name || this.people[i]!.color !== p.color) this.people[i] = { ...this.people[i]!, name: p.name, color: p.color };
     return i;
   }
 
-  /** The text changed (by `by`) since liveText: move the line authors along. */
-  private track(by: number) {
-    const next = this.text.toString();
-    this.lineValues = attribute(this.liveText, next, this.lineValues, by, by >= 0 ? this.history : undefined);
-    this.liveText = next;
+  private contribute(p: Participant) {
+    const now = Date.now();
+    // a long session: the version so far is cut first (its text is the text before this change, buffered in the batch)
+    this.pending = this.pending ? { ...this.pending, last: now, authors: addContributor(this.pending.authors, personOf(p)) } : { started: now, last: now, authors: addContributor([], personOf(p)) };
+    this.scheduleVersion();
   }
 
-  /**
-   * Hold an update for up to BATCH_MS: a burst by one author becomes one crash-log row and one attribute() pass.
-   * Another author's update writes the batch first, so line authors stay exact.
-   */
   private buffer(by: number, who: string | null, update: Uint8Array) {
-    if (this.pending) this.pending.updates.push(update);
-    else this.pending = { by, who, updates: [update] };
-    this.batchTimer ??= setTimeout(() => this.flushPending(), BATCH_MS);
+    if (this.batch) this.batch.updates.push(update);
+    else this.batch = { by, who, updates: [update] };
+    this.batchTimer ??= setTimeout(() => this.flushBatch(), BATCH_MS);
   }
 
-  /**
-   * Bring the line authors up to date with the text and write the buffered updates to the crash log (one merged
-   * row, plus the contributors if they changed). `write: false` is for saveMeta, which compacts the log anyway.
-   */
-  private flushPending(write = true) {
+  /** Move the line authors along, write the buffered updates as one tail row, and ack the connections they came from. */
+  private flushBatch() {
     if (this.batchTimer) {
       clearTimeout(this.batchTimer);
       this.batchTimer = null;
     }
-    const batch = this.pending;
-    if (!batch) return;
-    this.pending = null;
-    this.track(batch.by);
-    if (!write || this.ephemeral) return;
-    const data = batch.updates.length === 1 ? batch.updates[0]! : Y.mergeUpdates(batch.updates);
-    this.storage.transaction(() => {
-      this.storage.exec("INSERT INTO room_updates (room, seq, data, author) VALUES (?, ?, ?, ?)", this.key, this.nextSeq++, data, batch.by >= 0 ? batch.by : null);
-      if (this.stateDirty) this.saveState();
-    });
+    const b = this.batch;
+    if (!b) return this.ackAll();
+    this.batch = null;
+    const next = this.text.toString();
+    this.lineValues = attribute(this.liveText, next, this.lineValues, b.by, b.by >= 0 ? this.history : undefined);
+    this.liveText = next;
+    const data = b.updates.length === 1 ? b.updates[0]! : Y.mergeUpdates(b.updates);
+    this.store.appendUpdate(this.noteId, this.epoch, this.nextSeq++, data, b.by >= 0 ? b.by : null, this.pending);
+    this.tailRows++;
+    // the people list is saved with the compacted state: a tail row's author must be in the saved list
+    if (this.tailRows >= COMPACT_ROWS || this.people.length > this.savedPeople) this.compact();
+    this.ackAll();
   }
 
-  private savedState(): string {
-    const state: SavedState = { inBase: this.inBase, savedAt: this.savedAt, contributors: [...this.contributors.values()] };
-    return JSON.stringify(state);
-  }
+  private savedPeople = 0;
 
-  /** Persist inBase, savedAt and the contributors (the base and the log are saveMeta's). */
-  private saveState() {
-    this.stateDirty = false;
-    if (this.ephemeral) return;
-    this.storage.exec("UPDATE room_meta SET state = ? WHERE room = ?", this.savedState(), this.key);
-  }
-
-  /** The origin text is now `text` at `commit` (merged from outside, or gone): re-point origin lines, fetch its blame. */
-  private setOrigin(commit: string | null, text: string | null) {
-    this.lineValues = rebase(this.lineValues, this.liveText, text);
-    // remembered origin lines were lines of the old origin text
-    this.history.remap((v) => (isBaseLine(v) ? undefined : v));
-    this.originCommit = commit;
-    this.loadBlame();
-  }
-
-  /**
-   * Fetch the origin commit's Git blame and resolve its authors (one users query), then tell the clients. The
-   * resolved authors are cached in the room storage per path and commit, so reopening the room needs neither.
-   */
-  private loadBlame(prefetched?: Promise<BlameResult>) {
-    const commit = this.originCommit;
-    this.originAuthors = commit === null ? { authors: [], lines: [] } : this.cachedBlame(commit);
-    if (this.originAuthors) return this.scheduleBlame(0);
-    void (prefetched ?? this.fetchBlame(commit!))
-      .then((r) => {
-        if ("error" in r) console.error(`[room ${this.key}] blame failed:`, r.error);
-        return "error" in r ? null : r.blame;
-      })
-      .then(async (blame) => {
-        if (this.closed || this.originCommit !== commit) return;
-        const resolved = await resolveAuthors(this.db, blame ?? []);
-        if (this.closed || this.originCommit !== commit) return;
-        if (blame && !this.ephemeral) this.storage.putBlob(this.blameKey(), new TextEncoder().encode(JSON.stringify({ commit, ...resolved })));
-        this.originAuthors = resolved;
-        this.scheduleBlame(0);
-      });
-  }
-
-  /** Start fetching a commit's Git blame; errors are returned, so a blame nobody uses doesn't log. */
-  private fetchBlame(commit: string): Promise<BlameResult> {
-    return Promise.resolve()
-      .then(() => this.store.blame?.(this.repo, this.path, commit) ?? null)
-      .then(
-        (blame) => ({ blame }),
-        (error: unknown) => ({ error }),
-      );
-  }
-
-  /** One cache entry per room (its newest origin commit), so the cache doesn't grow with every commit. */
-  private blameKey() {
-    return `blame\u0000${this.key}`;
-  }
-
-  private cachedBlame(commit: string): OriginAuthors | null {
-    if (this.ephemeral) return null;
-    try {
-      const bytes = this.storage.getBlob(this.blameKey());
-      const saved = bytes ? (JSON.parse(new TextDecoder().decode(bytes)) as OriginAuthors & { commit: string }) : null;
-      return saved?.commit === commit ? { authors: saved.authors, lines: saved.lines } : null;
-    } catch {
-      return null;
+  /** Everything received so far is durable: tell the connections that sent changes. */
+  private ackAll() {
+    if (this.batch) return;
+    for (const c of this.conns) {
+      if ((c.received ?? 0) > (c.acked ?? 0)) {
+        c.acked = c.received;
+        this.sendControlTo(c, { t: "ack", n: c.received });
+      }
     }
   }
 
-  /** The line authors as clients get them (docs/05-v1-architecture.md, "Line authors"). No queries: authors are resolved. */
-  blame(): BlameMessage {
-    this.flushPending();
-    const byIdentity = new Map(this.people.map((p) => [`${p.gitName}\0${p.email}`, p]));
-    const origin = this.originAuthors;
-    return blameMessage(this.lineValues, this.people, (i) => {
-      const a = origin?.authors[origin.lines[i] ?? UNKNOWN];
-      return a ? (byIdentity.get(a.git) ?? a) : null;
+  /** Write the note's whole state (text, doc, line authors, open version) and drop the tail. */
+  compact() {
+    if (this.closed || !this.noteId) return;
+    if (this.batch) return this.flushBatch(); // (it compacts, or the rows are few)
+    this.store.compact(this.noteId, this.epoch, {
+      text: this.liveText,
+      doc: Y.encodeStateAsUpdate(this.doc),
+      authors: { people: this.people, lines: this.lineValues, history: this.history.entries() },
+      pending: this.pending,
     });
+    this.savedPeople = this.people.length;
+    this.tailRows = 0;
+    this.nextSeq = 1;
+  }
+
+  /** The line authors now: who wrote each line of the current text. */
+  lineAuthors(): LineAuthors {
+    this.flushBatch();
+    return { people: this.people, lines: this.lineValues };
   }
 
   /**
-   * Send the line authors to everyone within `ms` (at most once per BLAME_MS while the text keeps changing), and
-   * only if they changed since the last message.
+   * Cut the open version (or, with `force`, a version even without edits: restore, rename, delete), with `by` as its
+   * author when given. Returns the version id, or null when nothing was cut.
    */
+  cut(kind: VersionKind = "edit", opts: { force?: boolean; by?: Participant; message?: string; path?: string } = {}): number | null {
+    if (this.closed || !this.noteId) return null;
+    this.flushBatch();
+    if (!this.pending && !opts.force) return null;
+    let authors: Contributor[] = this.pending?.authors ?? [];
+    const by = opts.by;
+    if (by) authors = [{ ...personOf(by), edits: authors.find((a) => a.id === by.id)?.edits ?? 1 }, ...authors.filter((a) => a.id !== by.id)];
+    const now = Date.now();
+    const started = this.pending?.started ?? now;
+    this.pending = null;
+    this.compact();
+    const id = this.store.cutVersion(this.noteId, { kind, path: opts.path ?? this.path, text: this.liveText, started, authors, lines: { people: this.people, lines: this.lineValues }, message: opts.message ?? null });
+    this.lastVersion = id;
+    this.savedAt = now;
+    if (this.quietTimer) clearTimeout(this.quietTimer);
+    this.quietTimer = null;
+    this.broadcastStatus();
+    emit({ type: "saved", repo: this.repo, path: this.path, sha: versionRef(id) });
+    return id;
+  }
+
+  /** Cut the open version if it's due (idle VERSION_IDLE_MS or open VERSION_SPAN_MS). */
+  cutIfDue(now = Date.now()): boolean {
+    const p = this.pending;
+    if (!p || (now - p.last < VERSION_IDLE_MS && now - p.started < VERSION_SPAN_MS)) return false;
+    this.cut("edit");
+    return true;
+  }
+
+  /** With timers (Bun, and Workers while the object is awake): cut the version when it's due. */
+  private scheduleVersion() {
+    if (this.closed || !this.pending) return;
+    if (this.quietTimer) clearTimeout(this.quietTimer);
+    const p = this.pending;
+    const at = Math.min(p.last + VERSION_IDLE_MS, p.started + VERSION_SPAN_MS);
+    this.quietTimer = setTimeout(() => {
+      this.quietTimer = null;
+      if (!this.cutIfDue()) this.scheduleVersion();
+    }, Math.max(0, at - Date.now()) + 50);
+  }
+
+  get dirty(): boolean {
+    return this.pending !== null;
+  }
+
+  /** Make everything durable now (shutdown, before a rename). */
+  async flush(): Promise<void> {
+    this.flushBatch();
+    this.compact();
+  }
+
+  /** No Git blame to load any more: line authors are always known. */
+  ensureBlame() {}
+
+  blame(): BlameMessage {
+    this.flushBatch();
+    return blameMessage(this.lineValues, this.people);
+  }
+
   private scheduleBlame(ms = BLAME_MS) {
-    if (this.closed || this.originAuthors === null) return;
+    if (this.closed) return;
     if (this.blameTimer) {
       if (ms > 0) return;
       clearTimeout(this.blameTimer);
@@ -542,352 +423,8 @@ export class Room {
     }, ms);
   }
 
-  /** Persist the base and compact the crash log to a single update holding the whole document. */
-  private saveMeta() {
-    // the compacted state carries the line values: bring them up to date first (its rows would be compacted anyway)
-    this.flushPending(false);
-    this.stateDirty = false;
-    if (this.ephemeral) return;
-    this.storage.transaction(() => {
-      this.storage.exec(
-        `INSERT INTO room_meta (room, generation, base_commit, base_content, base_snapshot, blame, blame_people, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(room) DO UPDATE SET generation = excluded.generation, base_commit = excluded.base_commit,
-           base_content = excluded.base_content, base_snapshot = excluded.base_snapshot, blame = excluded.blame,
-           blame_people = excluded.blame_people, state = excluded.state`,
-        this.key,
-        this.generation,
-        this.baseCommit,
-        this.baseContent,
-        Y.encodeSnapshot(this.baseSnapshot),
-        JSON.stringify({ origin: this.originCommit, lines: this.lineValues, history: this.history.entries() }),
-        JSON.stringify(this.people),
-        this.savedState(),
-      );
-      this.storage.exec("DELETE FROM room_updates WHERE room = ?", this.key);
-      this.storage.exec("INSERT INTO room_updates (room, seq, data) VALUES (?, ?, ?)", this.key, 0, Y.encodeStateAsUpdate(this.doc));
-    });
-    this.nextSeq = 1;
-  }
-
-  private serial<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.lock.then(fn, fn);
-    this.lock = next.catch(() => {});
-    return next;
-  }
-
-  private isDirty() {
-    return !this.inBase || this.text.toString() !== this.baseContent;
-  }
-
-  private setDirty(dirty: boolean) {
-    if (dirty !== this.dirty) {
-      this.dirty = dirty;
-      this.broadcastStatus();
-    }
-  }
-
-  private markDirty() {
-    this.setDirty(true);
-    this.scheduleFlush();
-  }
-
-  private scheduleFlush(ms = config.quietMs) {
-    if (this.closed) return;
-    if (this.quietTimer) clearTimeout(this.quietTimer);
-    this.quietTimer = setTimeout(() => {
-      this.quietTimer = null;
-      void this.flush().catch((e) => {
-        // a store with a size budget (the demo) is full: say so once, keep the text live, try again now and then
-        if (!isErr(e, "StoreFullError")) console.error(`[room ${this.key}] flush failed:`, e);
-        else if (!this.fullWarned) {
-          this.fullWarned = true;
-          console.warn(`[room ${this.key}] not saved: ${e.message}`);
-        }
-      });
-    }, ms);
-  }
-
-  /** Commit the current text to the branch (after merging in anything that landed there first). */
-  flush(): Promise<void> {
-    this.flushPending();
-    if (this.quietTimer) {
-      clearTimeout(this.quietTimer);
-      this.quietTimer = null;
-    }
-    return this.serial(async () => {
-      let ok = false;
-      let full = false;
-      try {
-        await this.commitNow();
-        ok = true;
-      } catch (e) {
-        full = isErr(e, "StoreFullError");
-        throw e;
-      } finally {
-        // Whoever called us, unsaved text always gets another attempt (backing off after a failure).
-        if (!this.closed && this.dirty) this.scheduleFlush(ok ? config.quietMs : full ? 60_000 : Math.max(config.quietMs, 5000));
-        else if (this.quietTimer) {
-          clearTimeout(this.quietTimer);
-          this.quietTimer = null;
-        }
-      }
-    });
-  }
-
-  private commitNow(): Promise<void> {
-    // Rooms of the same repo commit one at a time: they all move the same branch, so committing in parallel
-    // would make them conflict with each other. Conflicts now only come from outside pushes.
-    return withRepoLock(this.storage, this.repo, () => this.commitLoop());
-  }
-
-  private async commitLoop() {
-    for (let attempt = 0; attempt < 6; attempt++) {
-      if (this.closed) return;
-      if (!this.isDirty()) {
-        // Same text, but maybe different CRDT items (deleted and retyped): rebase the snapshot on the live items,
-        // so the next 3-way merge replays outside changes onto text that still exists.
-        this.baseSnapshot = Y.snapshot(this.doc);
-        this.contributors.clear();
-        this.saveMeta();
-        this.setDirty(false);
-        return;
-      }
-      const head = await this.store.head(this.repo, this.branch);
-      if (this.closed) return;
-      if (head !== this.baseCommit) {
-        if (await this.absorb(head)) return;
-        continue;
-      }
-      // Capture content and snapshot together, synchronously, before awaiting the commit.
-      this.flushPending();
-      const content = this.text.toString();
-      const snap = Y.snapshot(this.doc);
-      const contributors = [...this.contributors.values()].sort((a, b) => b.edits - a.edits);
-      this.contributors.clear();
-      this.saving = true;
-      this.broadcastStatus();
-      // an undo (or typing back) after a save puts someone else's text back: their commit, so Git blame keeps them
-      const restored = this.restoredAuthor(content, contributors);
-      const author = restored ?? contributors[0]?.author ?? { name: "Grim", email: "grimoire@users.noreply.code.storage" };
-      const coauthors = restored ? [] : contributors.slice(1).map((c) => `Co-authored-by: ${c.author.name} <${c.author.email}>`);
-      const verb = this.inBase ? "Update" : "Create";
-      const message = `${verb} ${this.path}` + (coauthors.length ? `\n\n${coauthors.join("\n")}` : "");
-      let res: CommitOutcome | null = null;
-      try {
-        res = await this.store.commit({
-          repo: this.repo,
-          branch: this.branch,
-          expectedHead: head,
-          changes: [{ path: this.path, content }],
-          message,
-          author,
-        });
-      } finally {
-        this.saving = false;
-        if (!res?.ok) {
-          for (const c of contributors) {
-            const now = this.contributors.get(c.id);
-            this.contributors.set(c.id, now ? { ...now, edits: now.edits + c.edits } : c);
-          }
-          this.broadcastStatus();
-        }
-      }
-      if (this.closed) return;
-      if (!res.ok) continue;
-      this.baseCommit = res.sha;
-      this.baseContent = content;
-      this.baseSnapshot = snap;
-      this.inBase = true;
-      this.savedAt = Date.now();
-      this.saveMeta();
-      this.dirty = this.isDirty();
-      this.broadcastStatus();
-      emit({ type: "saved", repo: this.repo, path: this.path, sha: res.sha });
-      if (verb === "Create") emit({ type: "tree", repo: this.repo });
-      return;
-    }
-    throw new Error("could not commit after repeated conflicts");
-  }
-
-  /**
-   * The author to commit `content` as when every line it adds or changes (blank ones aside) is, by the line
-   * authors, one author's text that none of the `contributors` wrote (lines put back by undo or retyped as they
-   * were): that author. Else null (the contributors commit as usual).
-   */
-  private restoredAuthor(content: string, contributors: Contributor[]): Author | null {
-    if (content !== this.liveText || !this.inBase) return null;
-    const live = content.split("\n");
-    const kept = new Set(linePairs(this.baseContent.split("\n"), live).map(([, b]) => b));
-    let found: Author | null = null;
-    for (let i = 0; i < live.length; i++) {
-      if (kept.has(i) || !live[i]!.trim()) continue;
-      const a = this.gitAuthorOf(this.lineValues[i] ?? UNKNOWN);
-      if (!a || (found && gitKey(found) !== gitKey(a))) return null;
-      found = a;
-    }
-    const key = found && gitKey(found);
-    if (!found || contributors.some((c) => gitKey(c.author) === key)) return null;
-    return found;
-  }
-
-  /** The Git author of a line value: a participant's commit identity, or the origin line's Git author. */
-  private gitAuthorOf(v: number): Author | null {
-    if (v >= 0) {
-      const p = this.people[v];
-      return p ? { name: p.gitName, email: p.email } : null;
-    }
-    if (!isBaseLine(v)) return null;
-    const o = this.originAuthors;
-    const a = o?.authors[o.lines[baseIndex(v)] ?? UNKNOWN];
-    if (!a) return null;
-    const [name = "", email = ""] = a.git.split("\0");
-    return { name, email };
-  }
-
-  /**
-   * Before an agent writes: commit the edits people made that aren't saved yet, as their own commit, so the agent's
-   * commit (`commitPinned`) starts from a clean room and never carries them. A few tries; a store that keeps
-   * refusing leaves them pending (the agent's commit then includes them: the one case that mixes).
-   */
-  async settle(): Promise<void> {
-    for (let i = 0; i < 3 && !this.closed && this.isDirty(); i++) {
-      try {
-        await this.flush();
-      } catch (e) {
-        console.error(`[room ${this.key}] settle:`, e);
-        return;
-      }
-    }
-  }
-
-  /**
-   * The text right after `agent`'s write (call it synchronously after the write): what `commitPinned` commits as the
-   * agent's own, whatever people type in the meantime (their edits stay pending, for a commit of their own).
-   */
-  pin(agent: Participant): PinnedWrite {
-    this.flushPending();
-    // the quiet commit would take the live text (and whoever typed since): the pinned commit goes first
-    if (this.quietTimer) {
-      clearTimeout(this.quietTimer);
-      this.quietTimer = null;
-    }
-    return { content: this.text.toString(), snap: Y.snapshot(this.doc), base: this.baseContent, author: authorOf(agent), agentId: agent.id };
-  }
-
-  /**
-   * Commit a pinned agent write on its own commit (author: the agent). If the file changed upstream meanwhile, the
-   * pin is dropped and the normal quiet commit takes over. Returns the commit, or null when none was made.
-   */
-  commitPinned(pin: PinnedWrite): Promise<string | null> {
-    return this.serial(() =>
-      withRepoLock(this.storage, this.repo, async () => {
-        for (let attempt = 0; attempt < 6; attempt++) {
-          if (this.closed) return null;
-          if (this.inBase && pin.content === this.baseContent) {
-            this.contributors.delete(pin.agentId);
-            return null;
-          }
-          const head = await this.store.head(this.repo, this.branch);
-          if (this.closed) return null;
-          if (head !== this.baseCommit) {
-            if (await this.absorb(head)) return null;
-            if (this.baseContent !== pin.base) break;
-            continue;
-          }
-          const verb = this.inBase ? "Update" : "Create";
-          this.saving = true;
-          this.broadcastStatus();
-          let res: CommitOutcome | null = null;
-          try {
-            res = await this.store.commit({ repo: this.repo, branch: this.branch, expectedHead: head, changes: [{ path: this.path, content: pin.content }], message: `${verb} ${this.path}`, author: pin.author });
-          } finally {
-            this.saving = false;
-          }
-          if (this.closed) return null;
-          if (!res.ok) continue;
-          this.baseCommit = res.sha;
-          this.baseContent = pin.content;
-          this.baseSnapshot = pin.snap;
-          this.inBase = true;
-          this.savedAt = Date.now();
-          this.contributors.delete(pin.agentId);
-          this.saveMeta();
-          this.dirty = this.isDirty();
-          this.broadcastStatus();
-          emit({ type: "saved", repo: this.repo, path: this.path, sha: res.sha });
-          if (verb === "Create") emit({ type: "tree", repo: this.repo });
-          // what people typed after the write: their own commit, after the quiet period
-          if (this.dirty) this.scheduleFlush();
-          return res.sha;
-        }
-        // the file changed under the pin (or the branch kept moving): the quiet commit takes the live text
-        if (this.isDirty()) this.scheduleFlush();
-        return null;
-      }),
-    );
-  }
-
-  /** Bring the room up to date with the branch tip. Returns true if the file was deleted and the room closed. */
-  checkRemote(): Promise<boolean> {
-    return this.serial(async () => {
-      if (this.closed) return true;
-      const head = await this.store.head(this.repo, this.branch);
-      if (this.closed) return true;
-      if (head === this.baseCommit) return false;
-      return this.absorb(head);
-    });
-  }
-
-  /**
-   * 3-way merge of the branch tip into the live text: replay the change (base → remote) on a copy of the
-   * document as it was at the base snapshot, then merge that copy's update into the live document.
-   * Local edits made since the base are preserved by the CRDT.
-   */
-  private async absorb(head: string | null): Promise<boolean> {
-    this.flushPending();
-    const remote = head ? await this.store.readFile(this.repo, this.path, head) : null;
-    if (this.closed) return true;
-    if (remote === null) {
-      if (!this.isDirty()) {
-        this.closeWith("deleted");
-        return true;
-      }
-      // Deleted (or never created) upstream while we have unsaved text: keep it; the next commit recreates the file.
-      this.baseCommit = head;
-      this.baseContent = "";
-      this.baseSnapshot = Y.emptySnapshot;
-      this.inBase = false;
-      this.setOrigin(null, null);
-      this.saveMeta();
-    } else {
-      if (remote !== this.baseContent) {
-        const baseDoc = Y.createDocFromSnapshot(this.doc, this.baseSnapshot, new Y.Doc({ gc: false }));
-        const before = Y.encodeStateVector(baseDoc);
-        baseDoc.transact(() => applyDiff(baseDoc.getText(TEXT_NAME), this.baseContent, remote));
-        const update = Y.encodeStateAsUpdate(baseDoc, before);
-        this.baseSnapshot = Y.snapshot(baseDoc);
-        Y.applyUpdate(this.doc, update, EXTERNAL);
-        baseDoc.destroy();
-        this.sendControl({ t: "external", commit: head });
-        // the lines that came from outside are the new commit's: re-point origin lines at its text
-        this.setOrigin(head, remote);
-      }
-      this.baseCommit = head;
-      this.baseContent = remote;
-      this.inBase = true;
-      this.saveMeta();
-    }
-    this.setDirty(this.isDirty());
-    if (this.dirty) this.scheduleFlush();
-    return false;
-  }
-
   // ---- connections ----
 
-  /**
-   * `sv` (protocol v2): the client's state vector; sync step 2 with what it lacks goes right after hello and blame,
-   * before step 1, so the note's text arrives in the first flight. Without it (v1) the client asks with its step 1.
-   */
   addConn(conn: Conn, sv?: Uint8Array) {
     if (this.closeTimer) {
       clearTimeout(this.closeTimer);
@@ -895,13 +432,9 @@ export class Room {
     }
     this.conns.add(conn);
     this.sendControlTo(conn, { t: "hello", generation: this.generation, readOnly: conn.readOnly, ...this.status() });
-    // (while Git blame is still loading, everyone gets the line authors once it's there)
-    if (this.originAuthors !== null) {
-      const msg = this.blame();
-      this.sendControlTo(conn, msg);
-      // the only connection: what everyone has now
-      if (this.conns.size === 1) this.sentBlame = JSON.stringify(msg);
-    }
+    const msg = this.blame();
+    this.sendControlTo(conn, msg);
+    if (this.conns.size === 1) this.sentBlame = JSON.stringify(msg);
     if (sv) {
       const s2 = encoding.createEncoder();
       encoding.writeVarUint(s2, MSG_SYNC);
@@ -923,7 +456,6 @@ export class Room {
     this.emitPresence();
   }
 
-  /** Whether a v1 connection is in the room changed: tell the v2 channels their renewal. Returns whether it changed. */
   private updateMix(): boolean {
     let v1 = false;
     for (const c of this.conns) if (!c.renew) v1 = true;
@@ -933,11 +465,7 @@ export class Room {
     return true;
   }
 
-  /**
-   * Put back a connection the host had before it slept (Durable Object hibernation, after wake()): no hello and no
-   * sync (the client is up to date), and its awareness states (`[clientId, clock, state]`) as they were, without
-   * telling anyone (nothing changed for them).
-   */
+  /** Put back a connection the host had before it slept (no hello, no sync), with its awareness states. */
   reattach(conn: Conn, states: Array<[number, number, Record<string, unknown> | null]>) {
     if (this.closed) return;
     this.conns.add(conn);
@@ -955,8 +483,7 @@ export class Room {
 
   removeConn(conn: Conn) {
     if (!this.conns.delete(conn) || this.closed) return;
-    // what this connection typed is in the crash log before it's gone
-    this.flushPending();
+    this.flushBatch();
     for (const id of conn.awarenessIds) if (this.owners.get(id) === conn) this.owners.delete(id);
     awarenessProtocol.removeAwarenessStates(this.awareness, [...conn.awarenessIds], null);
     this.updateMix();
@@ -976,7 +503,12 @@ export class Room {
         const sub = decoding.readVarUint(dec);
         if (sub === syncProtocol.messageYjsSyncStep1) syncProtocol.readSyncStep1(dec, enc, this.doc);
       } else {
-        syncProtocol.readSyncMessage(dec, enc, this.doc, conn);
+        const sub = syncProtocol.readSyncMessage(dec, enc, this.doc, conn);
+        if (sub !== syncProtocol.messageYjsSyncStep1) {
+          conn.received = (conn.received ?? 0) + 1;
+          // nothing new (already had it): durable already
+          if (!this.batch) this.ackAll();
+        }
       }
       if (encoding.length(enc) > 1) conn.send(encoding.toUint8Array(enc));
     } else if (type === MSG_AWARENESS) {
@@ -984,15 +516,11 @@ export class Room {
       if (update) awarenessProtocol.applyAwarenessUpdate(this.awareness, update, conn);
     } else if (type === MSG_CONTROL) {
       const msg = JSON.parse(decoding.readVarString(dec)) as { t: string };
-      if (msg.t === "flush" && !conn.readOnly) void this.flush().catch((e) => console.error(`[room ${this.key}] flush:`, e));
+      // (a client's "save now"): make it durable; versions are cut by time and agents
+      if (msg.t === "flush" && !conn.readOnly) this.flushBatch();
     }
   }
 
-  /**
-   * Keep only the entries of an awareness update that this connection may write: client ids it owns (claiming
-   * up to MAX_IDS_PER_CONN unowned ones), never agents' or another connection's. The user is always the
-   * connection's own, so nobody can show up under someone else's name.
-   */
   private ownAwareness(conn: Conn, update: Uint8Array): Uint8Array | null {
     const entries: Array<[number, number, string]> = [];
     const dec = decoding.createDecoder(update);
@@ -1027,8 +555,9 @@ export class Room {
     return encoding.toUint8Array(enc);
   }
 
+  /** `dirty`: a version is open (edits not cut into one yet); `commit`: the newest version. Saving is immediate. */
   status() {
-    return { dirty: this.dirty, saving: this.saving, commit: this.baseCommit, savedAt: this.savedAt };
+    return { dirty: this.dirty, saving: false, commit: this.lastVersion === null ? null : versionRef(this.lastVersion), savedAt: this.savedAt };
   }
 
   broadcastStatus() {
@@ -1057,37 +586,29 @@ export class Room {
     return [...seen.values()];
   }
 
-  /** Tell everyone who's in the note (also after a connection was shown or hidden). */
   emitPresence() {
     emit({ type: "presence", repo: this.repo, path: this.path, users: this.participants() });
   }
 
-  // ---- agents ----
+  // ---- agents and the server's own edits ----
 
-  /** Apply an edit on behalf of an agent and show its cursor at `cursorIndex()` for a while. */
-  agentEdit(agent: Participant, fn: (text: Y.Text) => number | void) {
+  /** Apply an edit as `who` (an agent, a restorer, a creator) and show an agent's cursor at the returned index. */
+  agentEdit(who: Participant, fn: (text: Y.Text) => number | void) {
     this.lastActivity = Date.now();
     let cursor: number | void = undefined;
     this.doc.transact(() => {
       cursor = fn(this.text);
-    }, { user: agent });
-    // Only agents get a server-side cursor; a person's own cursor comes from their browser.
-    if (typeof cursor === "number" && agent.kind === "agent") this.setAgentCursor(agent, cursor);
+    }, { user: who });
+    this.flushBatch();
+    if (typeof cursor === "number" && who.kind === "agent") this.setAgentCursor(who, cursor);
     if (this.conns.size === 0) this.scheduleClose();
   }
 
-  /**
-   * Show an agent's cursor. Agents have no connection, so the room writes their awareness state itself, under a
-   * fixed client id per agent. Like any non-local state, it expires after awareness's outdated timeout (30 s).
-   */
   setAgentCursor(agent: Participant, index: number) {
     if (this.closed) return;
     const id = agentClientId(agent.id);
     const pos = Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(this.text, Math.min(index, this.text.length)));
-    const state: PresenceState = {
-      user: { id: agent.id, name: agent.name, color: agent.color, kind: "agent" },
-      cursor: { anchor: pos, head: pos },
-    };
+    const state: PresenceState = { user: { id: agent.id, name: agent.name, color: agent.color, kind: "agent" }, cursor: { anchor: pos, head: pos } };
     const aw = this.awareness;
     const isNew = !aw.states.has(id);
     aw.states.set(id, state);
@@ -1104,12 +625,6 @@ export class Room {
 
   // ---- lifecycle ----
 
-  /**
-   * Remove awareness states nobody renewed in time (people whose tab froze, agents' cursors): AWARENESS_TIMEOUT_MS, or
-   * the owning connection's `awarenessTimeoutMs` (v2 channels).
-   * The host may call it from its timer or alarm; the room also sweeps on messages and, with `sweepTimer`, by itself.
-   * Returns how many states were removed.
-   */
   sweepAwareness(now = Date.now()): number {
     this.lastSweep = now;
     if (this.closed) return 0;
@@ -1123,7 +638,6 @@ export class Room {
     return stale.length;
   }
 
-  /** With `sweepTimer`: sweep every AWARENESS_SWEEP_MS while there are awareness states, and not otherwise. */
   private scheduleSweep() {
     if (this.closed || this.opts.sweepTimer === false || this.sweepTimer) return;
     this.sweepTimer = setTimeout(() => {
@@ -1144,141 +658,52 @@ export class Room {
     }, 60_000);
   }
 
-  /** Whether the room has no connections and nothing happened in it for `idleMs`. */
   idle(idleMs = IDLE_CLOSE_MS): boolean {
     return !this.closed && this.conns.size === 0 && Date.now() - this.lastActivity >= idleMs;
   }
 
-  /**
-   * Commit and close the room if it's idle (see idle()); the close timer calls it, and hosts without one (Workers)
-   * call it from their alarm. Returns whether the room is closed now. A failed commit keeps the room (and logs).
-   */
+  /** Compact and close the room if nobody is in it and nothing happened for `idleMs`. The open version stays open. */
   async closeIfIdle(idleMs = IDLE_CLOSE_MS): Promise<boolean> {
     if (this.closed) return true;
     if (!this.idle(idleMs)) return false;
-    try {
-      if (this.dirty) await this.flush();
-    } catch (e) {
-      // A store with a size budget (the demo) refuses the text and always will: with nobody left in the room,
-      // keeping it would retry forever and pin it (and a Durable Object) in memory, so its unsaved text goes.
-      if (isErr(e, "StoreFullError") && this.idle(idleMs)) {
-        console.warn(`[room ${this.key}] closed without saving (nobody in it): ${e.message}`);
-        this.destroy(true);
-        return true;
-      }
-      console.error(`[room ${this.key}] final flush failed, keeping room:`, e);
-      return false;
-    }
-    if (this.closed) return true;
-    if (this.dirty || !this.idle(idleMs)) return false;
-    this.destroy(true);
+    this.cutIfDue();
+    this.destroy();
     return true;
   }
 
-  /** Close the room for a reason that clients should show (deleted, renamed). */
+  /** Close the room for a reason clients should show (deleted, renamed, removed). */
   closeWith(reason: string, extra: object = {}) {
     this.sendControl({ t: "closed", reason, ...extra });
     for (const c of this.conns) c.close(4000, reason);
-    this.destroy(true);
+    this.destroy();
   }
 
-  destroy(dropLog: boolean) {
+  /** Close: everything is compacted first (`discard`: a deleted note or a reset demo, nothing kept). */
+  destroy(discard = false) {
     if (this.closed) return;
-    // a log that's kept gets the buffered updates; one that's dropped doesn't need them
-    if (dropLog) this.pending = null;
-    else this.flushPending();
+    if (!discard) {
+      try {
+        this.flushBatch();
+        this.compact();
+      } catch (e) {
+        console.error(`[room ${this.key}] compact on close:`, e);
+      }
+    }
     this.closed = true;
     for (const t of [this.quietTimer, this.closeTimer, this.blameTimer, this.batchTimer, this.sweepTimer]) if (t) clearTimeout(t);
     this.quietTimer = this.closeTimer = this.blameTimer = this.batchTimer = this.sweepTimer = null;
     this.owners.clear();
     this.awareness.destroy();
-    if (dropLog && !this.ephemeral) {
-      this.storage.transaction(() => {
-        this.storage.exec("DELETE FROM room_updates WHERE room = ?", this.key);
-        this.storage.exec("DELETE FROM room_meta WHERE room = ?", this.key);
-      });
-    }
     this.onClose(this);
     this.doc.destroy();
   }
 }
 
-/** Whose a change is, for batching: a participant's id, or null for outside changes and the system. */
+/** Whose a change is, for batching: a participant's id, or null. */
 function authorId(origin: unknown): string | null {
-  const user = (origin as { user?: Participant } | null)?.user;
-  return user && user !== SYSTEM ? user.id : null;
-}
-
-type BlameResult = { blame: Author[] | null } | { error: unknown };
-
-const roomTablesReady = new WeakSet<RoomStorage>();
-
-/**
- * Make sure the crash-log tables exist in `storage` and have today's shape (Bun's db.ts makes older ones; a Durable
- * Object starts empty), upgrading in place: room_meta gets the blame, blame_people and state columns, and a
- * room_updates with a global rowid seq becomes `PRIMARY KEY (room, seq) WITHOUT ROWID`, rows copied as they are.
- * Rooms call it once per storage.
- */
-export function ensureRoomTables(storage: RoomStorage) {
-  if (roomTablesReady.has(storage)) return;
-  storage.exec(`CREATE TABLE IF NOT EXISTS room_meta (room TEXT PRIMARY KEY, generation TEXT NOT NULL, base_commit TEXT,
-    base_content TEXT NOT NULL, base_snapshot BLOB NOT NULL, blame TEXT, blame_people TEXT, state TEXT)`);
-  storage.exec(ROOM_UPDATES("room_updates"));
-  const has = (sql: string) => {
-    try {
-      storage.exec(sql);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  for (const col of ["blame", "blame_people", "state"]) {
-    if (!has(`SELECT ${col} FROM room_meta LIMIT 0`)) storage.exec(`ALTER TABLE room_meta ADD COLUMN ${col} TEXT`);
-  }
-  // only a table with a rowid has one: the old shape
-  if (has("SELECT rowid FROM room_updates LIMIT 0")) {
-    const author = has("SELECT author FROM room_updates LIMIT 0") ? "author" : "NULL";
-    storage.transaction(() => {
-      storage.exec("DROP TABLE IF EXISTS room_updates_new");
-      storage.exec(ROOM_UPDATES("room_updates_new"));
-      storage.exec(`INSERT INTO room_updates_new (room, seq, data, author) SELECT room, seq, data, ${author} FROM room_updates`);
-      storage.exec("DROP TABLE room_updates");
-      storage.exec("ALTER TABLE room_updates_new RENAME TO room_updates");
-    });
-  }
-  // an index db.ts used to make for the old shape: the primary key covers it now
-  storage.exec("DROP INDEX IF EXISTS room_updates_room");
-  roomTablesReady.add(storage);
-}
-
-const ROOM_UPDATES = (name: string) =>
-  `CREATE TABLE IF NOT EXISTS ${name} (room TEXT NOT NULL, seq INTEGER NOT NULL, data BLOB NOT NULL, author INTEGER, PRIMARY KEY (room, seq)) WITHOUT ROWID`;
-
-const SYSTEM: Participant = { id: "system", name: "Grim", email: "grimoire@users.noreply.code.storage", kind: "agent", color: "#888" };
-
-/**
- * Commit locks per repo, per room storage: one host (Bun's process, a Durable Object instance) has one storage. A
- * Durable Object reset in a reused isolate doesn't inherit the old instance's locks, whose promises may never settle.
- */
-const repoLocksBy = new WeakMap<RoomStorage, Map<string, Promise<unknown>>>();
-
-function withRepoLock<T>(storage: RoomStorage, repo: string, fn: () => Promise<T>): Promise<T> {
-  let repoLocks = repoLocksBy.get(storage);
-  if (!repoLocks) repoLocksBy.set(storage, (repoLocks = new Map()));
-  const locks = repoLocks;
-  const prev = locks.get(repo) ?? Promise.resolve();
-  const next = prev.then(fn, fn);
-  const tail = next.catch(() => {});
-  locks.set(repo, tail);
-  void tail.then(() => {
-    if (locks.get(repo) === tail) locks.delete(repo);
-  });
-  return next;
+  return (origin as { user?: Participant } | null)?.user?.id ?? null;
 }
 
 export function roomKey(repo: string, path: string) {
   return `${repo}\u0000${path}`;
 }
-
-/** A Git identity (name and email), as live people and origin authors are matched by. */
-const gitKey = (a: Author) => `${a.name}\0${a.email}`;
