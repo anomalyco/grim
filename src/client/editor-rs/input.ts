@@ -355,7 +355,7 @@ export function attachRustInput(v: RustEditorView): () => void {
     if (box) at = Number(box.dataset.from);
     else {
       const seg = target.closest("[data-f]") as HTMLElement | null;
-      if (!seg || !ln.contains(seg) || !seg.classList.contains("t") || !seg.classList.contains("link") || seg.classList.contains("ws")) return null;
+      if (!seg || !ln.contains(seg) || !seg.classList.contains("t") || !(seg.classList.contains("link") || seg.classList.contains("autolink")) || seg.classList.contains("ws")) return null;
       at = Number(seg.dataset.f);
     }
     const li = lineIndex(ln);

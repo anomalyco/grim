@@ -1,7 +1,7 @@
 // Link targets (editor-rs/links.ts): where a clicked link goes; heading slugs; the links of a line view.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { findHeading, headingSlug, lineLinks, linkTarget } from "../../src/client/editor-rs/links.ts";
+import { autolinkHref, findHeading, headingSlug, lineLinks, linkTarget } from "../../src/client/editor-rs/links.ts";
 import { toRLine } from "../../src/client/editor-rs/lineview.ts";
 import { safeUrl } from "../../src/client/editor-rs/input.ts";
 
@@ -146,6 +146,25 @@ describe("the links of a line view", () => {
     // the caret in the first link doesn't reveal it; expanding it (its pencil) does
     expect(linksOf(md, 2 + 6).map((l) => l.collapsed)).toEqual([true, true]);
     expect(linksOf(md, 2 + 6, 2 + 6).map((l) => l.collapsed)).toEqual([false, true]);
+  });
+
+  test("bare URLs and <url> autolinks: links whose text is their URL", () => {
+    const md = "see https://example.com/a. and www.example.org or <https://ex.com/b> `https://code.com`";
+    const ls = linksOf(md);
+    expect(ls.map((l) => [md.slice(l.from, l.to), l.raw, l.collapsed, !!l.auto])).toEqual([
+      ["https://example.com/a", "https://example.com/a", true, true],
+      ["www.example.org", "https://www.example.org", true, true],
+      ["<https://ex.com/b>", "https://ex.com/b", true, true],
+    ]);
+    expect(autolinkHref("a@b.co")).toBe("mailto:a@b.co");
+    expect(autolinkHref("mailto:a@b.co")).toBe("mailto:a@b.co");
+  });
+
+  test("a bare > continuing a quote is a blank quote line (the engine's block pass)", () => {
+    const e = new m.Engine("> one\n>\n> two\n\n>");
+    const kinds = e.render_all().lines.insert.map((l: { kind: string }) => l.kind);
+    e.free();
+    expect(kinds).toEqual(["quote", "quote", "quote", "paragraph", "paragraph"]);
   });
 
   test("a linked image", () => {

@@ -210,7 +210,7 @@
 .mde :is(.t.hl, .mk.hl.rv) { background: var(--mde-highlight); -webkit-box-decoration-break: clone; box-decoration-break: clone; }
 .mde :is(.t.hl, .mk.hl.rv):not(:is(.t.hl, .mk.hl.rv) + *) { border-top-left-radius: 2px; border-bottom-left-radius: 2px; }
 .mde :is(.t.hl, .mk.hl.rv):not(:has(+ :is(.t.hl, .mk.hl.rv))) { border-top-right-radius: 2px; border-bottom-right-radius: 2px; }
-.mde .t.link { color: var(--mde-link); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; text-decoration-color: rgba(41, 109, 154, 0.55); }
+.mde .t.link, .mde .t.autolink { color: var(--mde-link); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; text-decoration-color: rgba(41, 109, 154, 0.55); }
 .mde .t.tag { color: var(--mde-text-light); background: var(--mde-bg2); font-weight: 500; padding: 1px 4px; border-radius: 4px; }
 .mde .chip {
   display: inline-block;

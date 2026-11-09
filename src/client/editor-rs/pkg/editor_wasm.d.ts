@@ -26,7 +26,7 @@ export type CutResult = { text: string; patch: Patch };
 export type BlockType = "paragraph" | "heading" | "bullet" | "todo" | "numbered" | "quote" | "hr"
 | "fence" | "code" | "table-head" | "table-delim" | "table-row";
 export type SegKind = "token" | "text" | "mk" | "esc" | "chip" | "fence" | "pipe" | "pad" | "delim"; // render.ts names
-export type InlineType = "bold" | "italic" | "strike" | "underline" | "highlight" | "code" | "link" | "tag" | "image";
+export type InlineType = "bold" | "italic" | "strike" | "underline" | "highlight" | "code" | "link" | "autolink" | "tag" | "image";
 export type TokenKind = "indent" | "heading" | "bullet" | "todo" | "numbered" | "quote" | "hr";
 export type CellAlign = "left" | "center" | "right" | null;
 

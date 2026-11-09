@@ -681,7 +681,12 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   lineLinks(li: number): LineLink[] {
     const line = this.lines[li];
     if (!line || this.doc.lines.length !== this.lines.length) return [];
-    return lineLinks(line, this.lineText(li));
+    const links = lineLinks(line, this.lineText(li));
+    // an autolink with the caret in or touching it is text being edited: a click there places the caret
+    const span = this.doc.lines[li]!;
+    const head = this.sel.head - span.from;
+    if (this.sel.head >= span.from && this.sel.head <= span.to) for (const l of links) if (l.auto && l.from <= head && head <= l.to) l.collapsed = false;
+    return links;
   }
 
   /** The link on line `li` whose text holds line-relative position `at` (the start of a text or image under it). */

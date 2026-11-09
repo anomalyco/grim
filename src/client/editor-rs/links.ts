@@ -133,6 +133,18 @@ export interface LineLink {
   raw: string;
   /** Its markers are hidden (not expanded with its pencil): a click opens it. */
   collapsed: boolean;
+  /** An autolink (a bare URL or `<url>`): its text is its URL, `raw` where it goes (autolinkHref), no pencil. */
+  auto?: boolean;
+}
+
+/**
+ * Where an autolink goes (the engine's `url::autolink_href`): `www.…` as https, an address as mailto, anything with a
+ * scheme as written.
+ */
+export function autolinkHref(raw: string): string {
+  const c = raw.indexOf(":");
+  if (c >= 2 && /^[A-Za-z0-9+.-]+$/.test(raw.slice(0, c))) return raw;
+  return raw.includes("@") ? `mailto:${raw}` : `https://${raw}`;
 }
 
 /** The links of a line view; `text` is the line's raw text. */
@@ -158,7 +170,26 @@ export function lineLinks(line: RLine, text: string): LineLink[] {
       chip = { from: s.from, to: s.to };
     }
   }
-  return out;
+  // autolinks: runs of text styled "autolink" (a bare URL, or the URL between an angle autolink's < and >)
+  let run: { from: number; to: number } | null = null;
+  const flush = () => {
+    if (!run) return;
+    const url = text.slice(run.from, run.to);
+    const lt = text[run.from - 1] === "<" && text[run.to] === ">";
+    out.push({ from: lt ? run.from - 1 : run.from, textFrom: run.from, textTo: run.to, urlFrom: run.from, urlTo: run.to, to: lt ? run.to + 1 : run.to, raw: autolinkHref(url), collapsed: true, auto: true });
+    run = null;
+  };
+  for (const s of line.segs) {
+    if (s.kind === "text" && s.cls.includes("autolink")) {
+      if (run && run.to === s.from) run.to = s.to;
+      else {
+        flush();
+        run = { from: s.from, to: s.to };
+      }
+    } else if (s.from !== s.to) flush();
+  }
+  flush();
+  return out.sort((a, b) => a.from - b.from);
 }
 
 /** A heading line's visible text (its text segments, without markers or the link chips). */

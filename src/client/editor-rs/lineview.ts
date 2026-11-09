@@ -102,6 +102,7 @@ const CLS: Record<string, string> = {
   highlight: "hl",
   code: "code",
   link: "link",
+  autolink: "autolink",
   tag: "tag",
   image: "img",
 };
