@@ -27,6 +27,8 @@ export type EditorOptions = {
   upload?: ImageUploader;
   /** The user pressed Enter (after the engine made the new line). */
   onEnter?: () => void;
+  /** Review mode's highlighted lines changed in number (notes in a room). */
+  onReview?: (count: number) => void;
 } & (
   | {
       text: string;
@@ -51,12 +53,18 @@ export interface EditorHandle {
   selection(): { anchor: number; head: number } | null;
   /** Put the selection (raw offsets, clamped). */
   select(anchor: number, head: number): void;
+  /** Review mode on (the baseline its highlights are against) or off (null); notes in a room only. */
+  setReview(baseline: string | null): void;
+  /** Who made the live edits since `committed` (the newest commit's text), by the line authors; notes in a room only. */
+  liveAuthor(committed: string): { name: string; kind: string } | null;
 }
 
 export function mountEditor(container: HTMLElement, opts: EditorOptions): EditorHandle {
   if (opts.collab) {
-    const v = new RustEditorView(container, { collab: opts.collab, readOnly: opts.readOnly, images: opts.images, onLink: opts.onLink, upload: opts.upload, onEnter: opts.onEnter });
+    const v = new RustEditorView(container, { collab: opts.collab, readOnly: opts.readOnly, images: opts.images, onLink: opts.onLink, upload: opts.upload, onEnter: opts.onEnter, onReview: opts.onReview });
     return {
+      setReview: (b) => v.setReview(b),
+      liveAuthor: (c) => v.liveAuthor(c),
       ready: Promise.resolve(v),
       destroy: () => v.destroy(),
       focus: () => v.focus(),
@@ -111,5 +119,7 @@ export function mountEditor(container: HTMLElement, opts: EditorOptions): Editor
     scrollToHeading: (f) => view?.scrollToHeading(f) ?? false,
     selection: () => (view ? { ...view.sel } : null),
     select: (anchor, head) => view?.apply(view.engine.set_selection(Math.min(anchor, view.doc.text.length), Math.min(head, view.doc.text.length))),
+    setReview: () => {},
+    liveAuthor: () => null,
   };
 }

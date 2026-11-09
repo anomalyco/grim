@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { authorMarks, fitsMargin, type MarkLine } from "../../src/client/editor-rs/authors.ts";
 import { parseBlame } from "../../src/client/editor-rs/collab.ts";
-import { attribute, KEEP } from "../../src/shared/lineauthors.ts";
+import { attribute, KEEP, LineMemory } from "../../src/shared/lineauthors.ts";
 
 const L = (type: string, opts: { empty?: boolean; hidden?: boolean } = {}): MarkLine => ({ type, empty: !!opts.empty, hidden: !!opts.hidden });
 const P = L("paragraph");
@@ -95,6 +95,45 @@ test("parseBlame checks the message", () => {
   expect(parseBlame({ authors: [{ id: "u1", name: "A", color: "red;x" }], lines: [] })!.authors[0]).toEqual({ id: "u1", name: "A", kind: "human", color: "#888" });
   expect(parseBlame({ authors: [{ id: 1 }], lines: [] })).toBeNull();
   expect(parseBlame({ lines: [] })).toBeNull();
+});
+
+test("attribute with a LineHistory: undo, redo and typing a line back give it back to whoever had that text", () => {
+  const h = new LineMemory();
+  const AGENT = 0, ME = 1;
+  let text = "title\nagent line\nend";
+  let v = [AGENT, AGENT, AGENT];
+  const edit = (next: string, who: number) => {
+    v = attribute(text, next, v, who, h);
+    text = next;
+  };
+  edit("title\nagent line, edited\nend", ME);
+  expect(v).toEqual([AGENT, ME, AGENT]);
+  edit("title\nagent line\nend", ME); // undo
+  expect(v).toEqual([AGENT, AGENT, AGENT]);
+  edit("title\nagent line, edited\nend", ME); // redo
+  expect(v).toEqual([AGENT, ME, AGENT]);
+  edit("title\nagent line, edite\nend", ME); // typing back, a key at a time
+  edit("title\nagent lin\nend", ME);
+  expect(v).toEqual([AGENT, ME, AGENT]);
+  edit("title\nagent line\nend", ME);
+  expect(v).toEqual([AGENT, AGENT, AGENT]);
+  // a deleted line put back (undo of the deletion)
+  edit("title\nend", ME);
+  edit("title\nagent line\nend", ME);
+  expect(v).toEqual([AGENT, AGENT, AGENT]);
+  // blank lines and KEEP don't use the history
+  edit("title\n\nagent line\nend", ME);
+  expect(v).toEqual([AGENT, ME, AGENT, AGENT]);
+  expect(attribute("a\nb", "a\nbb", [0, 1], KEEP, h)).toEqual([0, 1]);
+});
+
+test("attribute with a LineHistory: two people, no agents", () => {
+  const h = new LineMemory();
+  const ANN = 0, BOB = 1;
+  let v = attribute("a\nann's line", "a\nann's line, bob", [ANN, ANN], BOB, h);
+  expect(v).toEqual([ANN, BOB]);
+  v = attribute("a\nann's line, bob", "a\nann's line", v, BOB, h);
+  expect(v).toEqual([ANN, ANN]);
 });
 
 describe("the margin layer (DOM)", () => {

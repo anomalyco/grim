@@ -46,6 +46,10 @@
   --mde-quote: #d4d4d8;
   --mde-selection: rgba(41, 109, 154, 0.18);
   --mde-highlight: rgba(245, 197, 66, 0.3);
+  /* review mode's highlights, the latest author's batch of changes (authors.ts): a light green with a thin green bar at its left,
+     apart from the blue selection and the yellow highlights and find matches */
+  --mde-review-tint: rgba(52, 168, 83, 0.13);
+  --mde-review-bar: rgba(52, 168, 83, 0.6);
   --mde-checked: #62626a;
   --mde-gutter: 33px;
   /* Faces come from the app (--font-*); the values after the commas are the defaults. */
@@ -54,6 +58,8 @@
   --mde-ui-font: var(--font-ui, var(--mde-font));
   --mde-mono: var(--font-mono, ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace);
   position: relative;
+  /* the tints (.mde-tints, z-index -1) paint over this background and under the text */
+  isolation: isolate;
   background: var(--mde-bg);
 }
 
@@ -457,6 +463,10 @@
 }
 /* the box has the line's font and line height (set inline), so this sits on the line's baseline */
 .mde .mde-author .nm { font: 500 11px/1 var(--mde-ui-font); letter-spacing: 0.01em; vertical-align: baseline; }
+/* review mode: the latest author's batch of changes, behind the text, under the selection */
+.mde-tints { position: absolute; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; }
+/* 8px wider than the text column at its left, so the bar doesn't touch the text */
+.mde .mde-tint { position: absolute; margin-left: -8px; padding-left: 8px; background: var(--mde-review-tint); box-shadow: inset 2px 0 0 var(--mde-review-bar); border-radius: 0 2px 2px 0; }
 .no-authors .mde-authors { display: none; }
 
 /* phones: slightly smaller code, tighter margins */

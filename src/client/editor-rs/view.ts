@@ -35,6 +35,8 @@ export type RustViewOptions = {
   upload?: ImageUploader;
   /** The user pressed Enter (a new line), after the engine handled it. */
   onEnter?: () => void;
+  /** Review mode's highlighted lines changed in number (collab views). */
+  onReview?: (count: number) => void;
 } & (
   | {
       /** The document's text. */
@@ -171,7 +173,7 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
     this.cursors = new RemoteCursors(this);
     this.code = new CodeHighlight(this);
     if (opts.collab) {
-      this.authors = new AuthorGutter(this, opts.collab.user as { id: string; name: string; color: string; kind?: string });
+      this.authors = new AuthorGutter(this, opts.collab.user as { id: string; name: string; color: string; kind?: string }, opts.onReview);
       if (opts.collab.blame) this.authors.set(opts.collab.blame);
     }
     this.foldKey = opts.collab ? foldStorageKey(opts.collab.repo, opts.collab.path) : opts.foldKey ? `grimoire.folds:${opts.foldKey}` : null;
@@ -556,6 +558,16 @@ export class RustEditorView implements CursorHost, CollabView, CodeHost {
   }
 
   /** The room sent new line authors. */
+  /** Review mode on (the baseline its highlights are against) or off (null). */
+  setReview(baseline: string | null): void {
+    this.authors?.setReview(baseline);
+  }
+
+  /** Who made the live edits since `committed` (the newest commit's text), by the line authors; null: none known. */
+  liveAuthor(committed: string): { name: string; kind: string } | null {
+    return this.authors?.liveAuthor(committed) ?? null;
+  }
+
   blameChanged(): void {
     if (this.collab?.blame) this.authors?.set(this.collab.blame);
   }

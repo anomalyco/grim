@@ -1603,6 +1603,45 @@ input[type="radio"] {
 .participants:empty {
   display: none;
 }
+/* the header's Review toggle: a quiet pill, green (the highlights' colour) while on, naming whose batch it shows */
+.review-toggle {
+  flex: none;
+  max-width: 260px;
+  height: 26px;
+  padding: 0 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: transparent;
+  color: var(--muted);
+  font: 500 12.5px/24px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.review-toggle:hover {
+  background: var(--paper-2);
+  color: var(--ink);
+}
+.review-toggle.on {
+  border-color: rgba(52, 168, 83, 0.6);
+  background: rgba(52, 168, 83, 0.13);
+  color: #1e7e3a;
+}
+.review-toggle.on::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #34a853;
+  vertical-align: 1px;
+}
+.review-toggle[hidden] {
+  display: none;
+}
 /* the header's "⋯" (History, Authors, Rename, Delete, Copy Link): a 30px ghost button at the right edge */
 .doc-more {
   flex: none;

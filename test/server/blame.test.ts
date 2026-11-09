@@ -213,6 +213,42 @@ describe("rooms: live line authors", () => {
     room.destroy(true);
   });
 
+  test("undo gives a line back to its previous author; no commit for the original text; a commit after a save keeps the author", async () => {
+    await seedRepo("undo1", "title\n");
+    const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });
+    const room = await rooms.get("undo1", "n.md", "main");
+    await Bun.sleep(100);
+    const a = fakeConn(alice);
+    room.addConn(a as never);
+    const ca = client(room, a);
+    room.agentEdit(bot, (t) => t.insert(t.length, "the agent's line"));
+    await room.flush();
+    const agentHead = await store.head("undo1", "main");
+    expect(names(room.blame())).toEqual(["Dave", "Claude"]);
+    // Alice types into the agent's line: hers; undo (the text as it was): the agent's again; redo: hers
+    ca.edit((t) => t.insert(t.length, " and Alice's words"));
+    expect(names(room.blame())).toEqual(["Dave", "Alice"]);
+    ca.edit((t) => t.delete(t.length - " and Alice's words".length, " and Alice's words".length));
+    expect(names(room.blame())).toEqual(["Dave", "Claude"]);
+    ca.edit((t) => t.insert(t.length, " and Alice's words"));
+    expect(names(room.blame())).toEqual(["Dave", "Alice"]);
+    // typed back to the agent's text one key at a time: the agent's
+    for (let i = 0; i < " and Alice's words".length; i++) ca.edit((t) => t.delete(t.length - 1, 1));
+    expect(names(room.blame())).toEqual(["Dave", "Claude"]);
+    // the delayed save: the text is the committed one, so no commit
+    await room.flush();
+    expect(await store.head("undo1", "main")).toBe(agentHead);
+    // saved with Alice's words, then undone: the commit putting the agent's text back is the agent's
+    ca.edit((t) => t.insert(t.length, "!"));
+    await room.flush();
+    ca.edit((t) => t.delete(t.length - 1, 1));
+    expect(names(room.blame())).toEqual(["Dave", "Claude"]);
+    await room.flush();
+    const head = (await store.head("undo1", "main"))!;
+    expect((await store.blame("undo1", "n.md", head))!.map((x) => x.name)).toEqual(["Dave", "Claude"]);
+    room.destroy(true);
+  });
+
   test("a stream of edits sends at most one message per BLAME_MS", async () => {
     await seedRepo("live2", "x\n");
     const rooms = new RoomManager(store, { storage: bunRoomStorage(), db: bunDb() });

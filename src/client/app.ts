@@ -2,6 +2,7 @@
 import { isFilePath, withNoteExtension } from "../shared/paths.ts";
 import { uiFontsLoaded } from "./fonts.ts";
 import { mountEditor, repoImages, type EditorHandle, type LinkTarget } from "./editor-rs/index.ts";
+import { latestBatch, REVIEW_HISTORY, reviewLabel } from "./review.ts";
 import { loadCollabEngine, preloadWasm } from "./editor-rs/engine.ts";
 import { warmCode } from "./editor-rs/code.ts";
 import { RustCollab, type ClosedReason, type CollabEvents } from "./editor-rs/collab.ts";
@@ -204,6 +205,8 @@ const saveStatusEl = h("div", { class: "save-status", "aria-live": "polite" });
 /** Line authors in the editor's margin, on unless turned off in this browser. */
 const SHOW_AUTHORS_KEY = "grimoire.showAuthors";
 /** The header's "⋯": History, Authors, the open note's Rename / Delete and Copy Link. */
+/** Review mode for the open note (⌘⌥R / Ctrl+Alt+R): the latest author's batch of changes (review.ts). */
+const reviewBtn = h("button", { type: "button", class: "review-toggle", "aria-pressed": "false", title: `Review mode: highlight the latest batch of changes by the latest author (${IS_MAC ? "⌘⌥R" : "Ctrl+Alt+R"})`, hidden: true, onclick: () => void toggleReview() }, "Review");
 const moreBtn = h("button", { type: "button", class: "icon-btn doc-more", title: "More", "aria-label": "More actions", "aria-haspopup": "menu", "aria-expanded": "false", hidden: true }, "⋯");
 const docBody = h("div", { class: "doc-body" });
 const history = new HistoryPanel((open) => app.classList.toggle("history-open", open));
@@ -376,7 +379,7 @@ function renderShell() {
     h("main", { class: "main" },
       h("header", { class: "doc-header" },
         h("button", { type: "button", class: "icon-btn sidebar-toggle", "aria-label": "Sidebar", "aria-expanded": "false", "aria-controls": "sidebar", onclick: () => setSidebarOpen(!app.classList.contains("sidebar-open")) }, h("span", { class: "burger", "aria-hidden": "true" })),
-        navEl, breadcrumbEl, sourceEl, h("div", { class: "spacer" }), saveStatusEl, participantsEl, moreBtn,
+        navEl, breadcrumbEl, sourceEl, h("div", { class: "spacer" }), saveStatusEl, participantsEl, reviewBtn, moreBtn,
       ),
       docBody,
     ),
@@ -403,6 +406,14 @@ function renderShell() {
       closeMenu();
       if (e.code === "BracketLeft") goBack();
       else goForward();
+      return;
+    }
+    // ⌘⌥R (Ctrl+Alt+R elsewhere): review mode on or off for the open note
+    if ((IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) && e.altKey && !e.shiftKey && e.code === "KeyR") {
+      if (document.querySelector("dialog[open]") || !session) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void toggleReview();
       return;
     }
     // ⌘⇧E (Ctrl+Shift+E elsewhere): the file tree, at the current row, from anywhere.
@@ -1402,6 +1413,7 @@ function noteMenu(): MenuItem[] {
   return [
     { label: history.open ? "Hide History" : "Show History", run: () => history.toggle() },
     { label: showAuthors() ? "Hide Authors" : "Show Authors", run: () => setShowAuthors(!showAuthors()) },
+    { label: session.review ? "Turn Off Review Mode" : "Review Mode", run: () => void toggleReview() },
     "sep",
     { label: "Rename…", disabled: readOnly, run: () => repo && revealRow(repo, path) && renameNoteInline(repo, path) },
     { label: "Delete…", disabled: readOnly, danger: true, run: () => repo && revealRow(repo, path) && void deleteRowByKey(`file:${fkey(repo.id, path)}`) },
@@ -2389,8 +2401,50 @@ function showEmpty() {
   ));
 }
 
+/**
+ * Review mode on or off for the open note. On: the latest author's batch (review.ts): the note's history, the newest
+ * commit's text and who made the live edits since (line authors) give the author and the baseline; off: it all goes.
+ */
+async function toggleReview() {
+  const s = session;
+  if (!s || s.reviewLoading) return;
+  if (s.review) {
+    s.setReview(null);
+    return renderReview();
+  }
+  if (s.liveText() === null) return toast("The note is still loading.", "info");
+  s.reviewLoading = true;
+  try {
+    const commits = await api.history(s.repo, s.path, REVIEW_HISTORY).catch(() => []);
+    const textAt = async (sha: string | null) => (sha ? (await api.file(s.repo, s.path, sha)).content : "");
+    const head = await textAt(commits[0]?.sha ?? null);
+    const text = s.liveText() ?? head;
+    const live = text !== head ? s.liveAuthor(head) : null;
+    const batch = latestBatch(commits, live);
+    const baseline = batch.baseline === (commits[0]?.sha ?? null) ? head : await textAt(batch.baseline);
+    if (session !== s) return;
+    s.setReview({ author: batch.author?.name ?? "Unknown", baseline });
+    renderReview();
+  } catch (err) {
+    toast(`Couldn't start review mode: ${err instanceof Error ? err.message : String(err)}`, "error");
+  } finally {
+    s.reviewLoading = false;
+  }
+}
+
+/** The header's review toggle for the open note. */
+function renderReview() {
+  reviewBtn.hidden = !session;
+  if (!session) return;
+  const on = !!session.review;
+  reviewBtn.setAttribute("aria-pressed", String(on));
+  reviewBtn.classList.toggle("on", on);
+  reviewBtn.textContent = reviewLabel(session.review?.author ?? null, session.reviewCount);
+}
+
 function renderHeader() {
   moreBtn.hidden = !session;
+  renderReview();
   if (!session && history.open) history.close();
   if (!current) {
     clear(breadcrumbEl);
@@ -2523,6 +2577,11 @@ class Session {
   readonly localUser: PresenceState["user"];
   readonly host = h("div", { class: "editor-host" });
   private editor: EditorHandle | null = null;
+  /** Review mode for this note while it's open (review.ts): whose batch, and the baseline it's against. */
+  review: { author: string; baseline: string } | null = null;
+  reviewLoading = false;
+  /** Review mode's highlighted lines (the header's toggle shows the count). */
+  reviewCount = 0;
   private fallback: (() => void) | null = null;
   /** Unsaved text from a crashed session that couldn't be merged, shown above the editor. */
   private banner: HTMLElement | null = null;
@@ -2854,7 +2913,11 @@ class Session {
       upload: async (file: File) => (await api.uploadImage(this.repo, this.path, file)).markdown,
       notice: (m: string, kind?: "info" | "error") => toast(m, kind),
     };
-    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t), upload, onEnter: () => this.autoName() });
+    this.editor = mountEditor(this.host, { collab: this.provider!, readOnly: this.readOnly, images, onLink: (t) => openLink(this, t), upload, onEnter: () => this.autoName(), onReview: (n) => {
+      this.reviewCount = n;
+      if (session === this) renderReview();
+    } });
+    this.editor.setReview(this.review?.baseline ?? null);
     if (focus) this.editor.focus();
     if (focus && typedAhead?.path === this.path && performance.now() <= typedAhead.until) void this.replayTypedAhead(this.editor);
     const carry = this.carry;
@@ -2884,6 +2947,22 @@ class Session {
     this.hashDone = true;
     if (this.spot) this.restore(this.spot);
     this.markShown();
+  }
+
+  /** The live editor's text (null until it's up). */
+  liveText(): string | null {
+    return this.editor ? this.editor.text() : null;
+  }
+
+  /** Who made the live edits since `committed` (the newest commit's text), by the line authors. */
+  liveAuthor(committed: string): { name: string } | null {
+    return this.editor?.liveAuthor(committed) ?? null;
+  }
+
+  /** Review mode on (whose batch, against which baseline) or off (null). */
+  setReview(review: { author: string; baseline: string } | null) {
+    this.review = review;
+    this.editor?.setReview(review?.baseline ?? null);
   }
 
   /** The note's caret and scroll as it was left (Back / Forward), once its editor is up. */

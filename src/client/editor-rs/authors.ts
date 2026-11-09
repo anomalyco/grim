@@ -2,9 +2,13 @@
 // (`{t:"blame"}`, RustCollab.blame); this layer shows a small muted name at the editor pane's left edge (no colour: the message's
 // colours aren't used here; names are never cut: one that doesn't fit the margin isn't shown), only where it changes.
 // Between messages the values move with the text (attribute): our own edits are ours at once, others' keep the
-// line's previous author until the next message.
+// line's previous author until the next message. An edit that brings back a line's exact text (undo, redo, typing it
+// back) gives it back to whoever had that text (the client's LineHistory, as the room's), so there's no flicker.
+// Review mode (setReview, review.ts) tints the lines that differ from a baseline: a light green with a thin bar at its
+// left, behind the text.
 
-import { attribute, KEEP } from "../../shared/lineauthors.ts";
+import { attribute, KEEP, LineMemory, type LineHistory } from "../../shared/lineauthors.ts";
+import { reviewChanged } from "../review.ts";
 import type { Blame, BlameAuthor } from "./collab.ts";
 import { crashSafe } from "./guard.ts";
 import type { RLine } from "./lineview.ts";
@@ -70,9 +74,17 @@ export interface AuthorHost {
 
 export class AuthorGutter {
   readonly layer: HTMLDivElement;
+  /** Review mode's tints behind the text (under the text column, below the selection). */
+  readonly tints: HTMLDivElement;
   private authors: BlameAuthor[] = [];
   /** One per line of the view's text (once a message arrived). */
   private values: number[] = [];
+  /** Who had the line texts our edits took away (by author id, so it outlives messages). */
+  private memory = new LineMemory();
+  private remembered: BlameAuthor[] = [];
+  /** Review mode's baseline (null: off), and the highlighted lines' count last drawn. */
+  private review: string | null = null;
+  private reviewCount = -1;
   private has = false;
   private self = -1;
   private frame = 0;
@@ -80,10 +92,16 @@ export class AuthorGutter {
   constructor(
     private view: AuthorHost,
     private me: { id: string; name: string; color: string; kind?: string },
+    /** Review mode's highlighted lines changed in number. */
+    private onReview?: (count: number) => void,
   ) {
     this.layer = document.createElement("div");
     this.layer.className = "mde-authors";
     view.wrapper.appendChild(this.layer);
+    this.tints = document.createElement("div");
+    this.tints.className = "mde-tints";
+    this.tints.setAttribute("aria-hidden", "true");
+    view.wrapper.insertBefore(this.tints, view.wrapper.firstChild);
   }
 
   /** The room's line authors arrived. */
@@ -104,8 +122,49 @@ export class AuthorGutter {
       if (this.self < 0) this.self = this.authors.push({ id: this.me.id, name: this.me.name, kind: this.me.kind ?? "human", color: this.me.color }) - 1;
       who = this.self;
     }
-    this.values = attribute(prev, next, this.values, who);
+    this.values = attribute(prev, next, this.values, who, who === KEEP ? undefined : this.history);
   }
+
+  /** Review mode on (`baseline`: the text the highlights are against) or off (null). */
+  setReview(baseline: string | null): void {
+    this.review = baseline;
+    this.schedule();
+  }
+
+  /**
+   * Who made the live edits since `committed` (the text of the note's newest commit): the line author of most of the
+   * lines that differ from it (blank ones aside), or null when there are none or nobody's known yet.
+   */
+  liveAuthor(committed: string): BlameAuthor | null {
+    if (!this.has) return null;
+    const changed = reviewChanged(committed, this.view.doc.text);
+    const counts = new Map<number, number>();
+    changed.forEach((c, i) => {
+      const v = this.values[i] ?? -1;
+      if (c && this.authors[v]) counts.set(v, (counts.get(v) ?? 0) + 1);
+    });
+    let best = -1;
+    for (const [v, n] of counts) if (best < 0 || n > counts.get(best)!) best = v;
+    return this.authors[best] ?? null;
+  }
+
+  /** The line history on author ids (values index `authors`, which each message replaces). */
+  private history: LineHistory = {
+    remember: (text, v) => {
+      const a = this.authors[v];
+      if (!a) return this.memory.remember(text, -1);
+      let n = this.remembered.findIndex((r) => r.id === a.id);
+      if (n < 0) n = this.remembered.push(a) - 1;
+      this.memory.remember(text, n);
+    },
+    recall: (text) => {
+      const n = this.memory.recall(text);
+      if (n === undefined || n < 0) return n;
+      const a = this.remembered[n]!;
+      const i = this.authors.findIndex((x) => x.id === a.id);
+      return i >= 0 ? i : this.authors.push(a) - 1;
+    },
+  };
 
   schedule(): void {
     if (this.frame) return;
@@ -121,6 +180,7 @@ export class AuthorGutter {
     const v = this.view;
     const frag = document.createDocumentFragment();
     let room = 0;
+    this.drawTints();
     if (this.has && v.doc.lines.length === v.lines.length && lineDivs(v.root).length === v.lines.length) {
       const base = v.wrapper.getBoundingClientRect();
       const box = v.root.getBoundingClientRect();
@@ -177,8 +237,54 @@ export class AuthorGutter {
     }
   }
 
+  /** Review mode's tints: one per run of highlighted lines, the text column's width. */
+  private drawTints(): void {
+    const v = this.view;
+    const tints = document.createDocumentFragment();
+    let count = 0;
+    if (this.review !== null && v.doc.lines.length === v.lines.length && lineDivs(v.root).length === v.lines.length) {
+      const changed = reviewChanged(this.review, v.doc.text);
+      count = changed.filter(Boolean).length;
+      const base = v.wrapper.getBoundingClientRect();
+      const box = v.root.getBoundingClientRect();
+      const rootStyle = getComputedStyle(v.root);
+      const textLeft = box.left + (parseFloat(rootStyle.paddingLeft) || 0);
+      const textRight = box.right - (parseFloat(rootStyle.paddingRight) || 0);
+      const kids = lineDivs(v.root);
+      let run: { top: number; bottom: number } | null = null;
+      const flush = () => {
+        if (!run) return;
+        const t = document.createElement("div");
+        t.className = "mde-tint";
+        t.style.top = `${run.top - base.top}px`;
+        t.style.height = `${run.bottom - run.top}px`;
+        t.style.left = `${textLeft - base.left}px`;
+        t.style.width = `${textRight - textLeft}px`;
+        tints.appendChild(t);
+        run = null;
+      };
+      v.lines.forEach((l, i) => {
+        if (l.hidden || !changed[i]) return flush();
+        const r = (kids[i] as HTMLElement).getBoundingClientRect();
+        if (r.height <= 0) return;
+        if (run && Math.abs(r.top - run.bottom) < 1) run.bottom = r.bottom;
+        else {
+          flush();
+          run = { top: r.top, bottom: r.bottom };
+        }
+      });
+      flush();
+    }
+    this.tints.replaceChildren(tints);
+    if (count !== this.reviewCount) {
+      this.reviewCount = count;
+      this.onReview?.(count);
+    }
+  }
+
   destroy(): void {
     if (this.frame) cancelAnimationFrame(this.frame);
     this.layer.remove();
+    this.tints.remove();
   }
 }
