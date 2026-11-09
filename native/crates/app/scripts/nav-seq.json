@@ -1,0 +1,26 @@
+{
+ "events": [
+  {"t": 0.3, "type": "tap", "key": "row:Ideas.md"},
+  {"t": 0.6, "type": "tap", "key": "row:Welcome.md"},
+  {"t": 0.9, "type": "tap", "key": "row:people/hiring.md"},
+  {"t": 1.0, "type": "mark", "name": "abc"},
+  {"t": 1.2, "type": "key", "name": "[", "cmd": true},
+  {"t": 1.4, "type": "key", "name": "[", "cmd": true},
+  {"t": 1.5, "type": "mark", "name": "back2"},
+  {"t": 1.7, "type": "key", "name": "]", "cmd": true},
+  {"t": 1.8, "type": "mark", "name": "fwd"},
+  {"t": 2.0, "type": "tap", "key": "nav-back"},
+  {"t": 2.1, "type": "mark", "name": "hdrback"},
+  {"t": 2.3, "type": "tap", "key": "nav-forward"},
+  {"t": 2.4, "type": "mark", "name": "hdrfwd"},
+  {"t": 2.6, "type": "tap", "button": "back", "x": 600, "y": 400},
+  {"t": 2.7, "type": "mark", "name": "mouseback"},
+  {"t": 2.9, "type": "tap", "button": "forward", "x": 600, "y": 400},
+  {"t": 3.0, "type": "mark", "name": "mousefwd"},
+  {"t": 3.2, "type": "key", "name": "[", "cmd": true},
+  {"t": 3.4, "type": "tap", "key": "row:projects/launch/plan.md"},
+  {"t": 3.6, "type": "mark", "name": "d"},
+  {"t": 3.8, "type": "key", "name": "]", "cmd": true},
+  {"t": 4.0, "type": "mark", "name": "end"}
+ ]
+}

@@ -1134,6 +1134,7 @@ impl App {
             self.close_gate(false);
         }
         tx.instant();
+        self.nav_leave();
         self.leave_workspace();
         let title = if title.is_empty() { self.store.known_title(&server, &id).unwrap_or_default() } else { title };
         let ws = WsRef::Remote { server: server.clone(), id: id.clone(), title };
@@ -2322,6 +2323,7 @@ impl App {
                 rem.blame = Some(b);
             }
         }
+        self.review_retarget();
         self.store.set_note(&ws, Some(rel.clone()));
         self.set_title_gated(files::note_name(Path::new(&rel)).to_string(), tx);
         self.scroll_top_gated(tx);
@@ -2399,6 +2401,9 @@ impl App {
         shown.set_selection(sel);
         shown.set_read_only(true);
         self.ed = shown;
+        if let Some(from) = self.remote.as_ref().and_then(|r| r.note.clone()) {
+            self.nav_renamed(&from, &to);
+        }
         let Some(rem) = self.remote.as_mut() else { return };
         rem.generation = next_gen();
         rem.note = Some(to.clone());
@@ -2758,6 +2763,7 @@ impl App {
                         self.ed.set_fold_keys(&keys);
                     }
                     self.run_goto(tx);
+                    self.nav_synced(tx);
                 }
                 Notice::Reset => reset = true,
                 Notice::SaveState(v) | Notice::Hello { msg: v, .. } => {
@@ -2774,7 +2780,8 @@ impl App {
                     if let Some(rem) = self.remote.as_mut() {
                         rem.blame = Some(b.clone());
                         let me = rem.user["id"].as_str().unwrap_or_default().to_string();
-                        rem.authors = Some(crate::authors::LineAuthors::new(b.clone(), self.ed.text(), &me));
+                        let old = rem.authors.take();
+                        rem.authors = Some(crate::authors::LineAuthors::new(b.clone(), self.ed.text(), &me).renewed(old));
                     }
                 }
                 _ => {}
@@ -3365,7 +3372,7 @@ pub fn demo(app: &mut App, state: &str) {
         m.guest = true;
         let id = "demo-guest-1".to_string();
         app.store.guest = Some(crate::workspaces::Guest { color: crate::workspaces::guest_color(&id), id, name: "moist-noodle".into() });
-    } else if !state.is_empty() && !["disconnected", "toasts", "notfound", "demo"].contains(&state) {
+    } else if !state.is_empty() && !["disconnected", "toasts", "notfound", "demo", "review"].contains(&state) {
         m.account = "confused-noodle".into();
         m.fail = match state {
             "missing" => Some(ApiError::NotFound("folder not found".into())),
@@ -3405,6 +3412,20 @@ pub fn demo(app: &mut App, state: &str) {
         return;
     }
     let ada = m.add_peer("Team notes.md", 4242, "Ada", "#d6409f");
+    if state == "review" {
+        // the note's history: we wrote it, then Ada's two commits (and her live edit, " today", below)
+        let mut rest = crate::fake::FakeRest::new(server, "Ann Lee", "ann@example.com");
+        let mut w = crate::fake::FakeWs::new("team", "Team", true);
+        w.files = vec!["Team notes.md".into(), "ideas/Roadmap.md".into(), "ideas/Names.md".into(), "Meeting 1-1.md".into()];
+        rest.workspaces.push(w);
+        let c = |sha: &str, name: &str, email: &str| serde_json::json!({ "sha": sha, "message": "Update Team notes.md", "authorName": name, "authorEmail": email, "date": 0 });
+        rest.history = Some(vec![
+            (c("c3", "Ada", "ada@example.com"), m.text("Team notes.md").unwrap_or_default()),
+            (c("c2", "Ada", "ada@example.com"), "# Team notes\n\nPlanning for the **launch**:\n\n- Draft the announcement\n- Review the docs\n".into()),
+            (c("c1", "Ann Lee", "ann@example.com"), "# Team notes\n\nPlanning for the launch:\n\n- Draft the announcement\n- Review the docs\n".into()),
+        ]);
+        m.rest = Some(std::sync::Arc::new(std::sync::Mutex::new(rest)));
+    }
     let m = Rc::new(RefCell::new(m));
     app.backend = Backend::Mock(m.clone());
     let mut tx = Tx::default();
@@ -3436,6 +3457,10 @@ pub fn demo(app: &mut App, state: &str) {
     m.borrow_mut().to_app.push_back(collab::protocol::control_frame(&blame));
     app.pump_mock();
     app.pump_collab();
+    if state == "review" {
+        // review mode on: Ada's batch (her live edit and her two commits, back to ours), the pill naming her
+        app.toggle_review(&mut tx);
+    }
     if state == "toasts" {
         // the web's toasts: info, an error (yellow dot), one with a button
         app.show_toast("Restored version 9b2e7c4".into());

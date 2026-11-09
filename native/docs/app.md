@@ -44,18 +44,19 @@ beside Grim.app without sharing anything:
 | Server | `https://grimnotes.app` | `https://staging.grimnotes.app` |
 | Bundle, process, app menu | `Grim.app`, `Grim` | `Grim Beta.app`, `Grim Beta` (About / Quit Grim Beta) |
 | Bundle id (and its settings) | `co.anoma.grimoire` | `co.anoma.grimoire.beta` |
-| Keychain service (tokens, OpenCode pairing, voice keys) | `Grimoire` | `Grimoire Beta` |
+| Secrets (sign-in tokens, OpenCode pairing and voice session, voice keys) | Keychain, service `Grimoire` | `~/Library/Application Support/Grimoire Beta/secrets.json` (below) |
 | App data | `~/Library/Application Support/Grimoire` | `~/Library/Application Support/Grimoire Beta` |
 | Caches | `~/Library/Caches/Grimoire` | `~/Library/Caches/Grimoire Beta` |
 | Icon | `AppIcon.icns` | `AppIcon-Beta.icns`: orange scratches and "BETA" |
 
-Both open `~/Documents/Grimoire` as the default local folder. Grim Beta shows an orange **BETA** badge in the sidebar's
-switcher row and in the note header (`header::beta_badge`), and its window title with no note is "Grim Beta".
+Both open `~/Documents/Grimoire` as the default local folder. Grim Beta shows an orange **BETA** badge in the note
+header (`header::beta_badge`; not in the sidebar's switcher row), and its window title with no note is "Grim Beta".
 
 ```sh
 cargo build --release -p grimoire --features beta
-target/release/grimoire --app-variant          # which app a build is: name, server, Keychain service, folders
-target/release/grimoire --remote-demo --snap beta.png           # headless, with the BETA badges
+target/release/grimoire --app-variant          # which app a build is: name, server, Keychain service, secrets file, folders
+target/release/grimoire --secrets-selftest     # beta: the secrets file round trip in a temp folder (0600 file, 0700 folder)
+target/release/grimoire --remote-demo --snap beta.png           # headless, with the BETA badge
 scripts/bundle.sh --beta                       # dist/Grim Beta.app
 scripts/install-beta.sh                        # bundle, copy to ~/Applications/Grim Beta.app, quit and reopen only Grim Beta (open -g)
 ```
@@ -65,6 +66,28 @@ reopens it with `open -g`; Grim.app is never touched. Both variants share `targe
 `target/release/grimoire` is the beta until the next plain build (only the grimoire crate rebuilds).
 The icon: `packaging/make-beta-icon.swift` (run in `packaging/`) makes `AppIcon-Beta-{1024,32,16}.png` from Grim's,
 and `packaging/make-icns.sh --beta` turns them into `AppIcon-Beta.icns`.
+
+**Secrets in Grim Beta live in a file, not the Keychain.** Grim Beta is ad-hoc signed, so every build has a new
+code identity; Keychain items' access lists only trust the build that made them, so macOS asked for Keychain access on
+every launch. With the feature `beta`, `workspaces::keychain` (same API: `get`, `get_secret`, `set`, `remove`,
+`describe`) is a file store: the sign-in token per server, the OpenCode pairing (`opencode-pairing`), the voice session
+(`opencode-delegator`) and the voice keys (`voice.openai`, `voice.opencode-console`) are kept in
+`~/Library/Application Support/Grimoire Beta/secrets.json`, a JSON object of account -> value with a `_comment`
+"Grim Beta development secrets (staging only)". The folder is 0700, the file 0600, and every write goes to a temp file
+that is renamed over it. Values are never logged. The legacy `/usr/bin/security` lookups are off in the beta. Grim
+(production) keeps the Keychain unchanged (`workspaces::os_keychain`).
+
+Nothing is copied from the Keychain automatically (reading it would ask again): after updating, sign in once more in
+Grim Beta and re-pair OpenCode (and re-enter a voice key if you use one); the file is created at that first save. To
+skip that, `"~/Applications/Grim Beta.app/Contents/MacOS/Grim Beta" --import-keychain-secrets` copies the old
+`Grimoire Beta` Keychain items once (macOS asks once per item).
+
+**The microphone permission** is still reset by every rebuild: an ad-hoc signature's designated requirement is its
+cdhash, which TCC checks, so macOS asks for the microphone again the first time voice is used after an install.
+`scripts/bundle.sh` signs with `GRIM_SIGN_IDENTITY` when it's set (default ad-hoc): a stable code-signing identity
+(a self-signed "Grim Beta Dev" certificate made once in Keychain Access > Certificate Assistant > Create a
+Certificate, type Code Signing, or the Mac's Developer ID) keeps the requirement the same across builds, so the
+permission sticks. The first signing with a key may ask to let `codesign` use it (Always Allow, once).
 
 Sign-in on staging is Google through the staging Worker, the same flow as production (the app's loopback
 `http://127.0.0.1:<port>/callback`, `/auth/google/start?client=mac`, then `/auth/token`); staging shares production's
@@ -99,8 +122,10 @@ for a workspace.
 | `sidebar.rs` | The sidebar view (below) and its handlers: row presses, Cmd-\ toggle, the tree's keys |
 | `header.rs` | The note's header (the web's `.doc-header`): breadcrumb, the save status, the people in the note (avatars), the ⋯ menu (History, Authors, Rename…, Delete…, Copy Link, Open in Browser) |
 | `history.rs` | The history drawer (the web's `history.ts`): versions, a version's diff or text, Restore; the server's endpoints or `git` for a local folder |
-| `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text), `marks` (the web's `authorMarks`), the margin's names |
+| `authors.rs` | Line authors: `LineAuthors` (the room's `blame`, following the text, undo giving lines back), `marks` (the web's `authorMarks`), the margin's names, review mode's tints |
+| `review_mode.rs` | Review mode: the latest author's batch from the note's history, the header's pill, Edit ▸ Review Mode, `--review-mode-selftest` |
 | `filesearch.rs` | The "Search files" dialog (⌘P): `rank` (the web's `rankFiles`), its keys, its view, the sidebar's search button |
+| `nav.rs` | Back and forward through the notes opened (below): the history (`Nav`, at most 100 places, each with its caret and scroll), the header's ‹ › (`buttons`), Go ▸ Back ⌘[ / Forward ⌘] (`go_menu`), the mouse's buttons 4 and 5 |
 | `find.rs` | Find in the note (⌘F, Edit ▸ Find…): the bar at the page's top right, matches in the raw Markdown drawn with the selection's rects, next / previous, Esc (below) |
 | `tree_edit.rs` | The File menu (`FILE_MENU`: New Note, New Folder, New Workspace…, Open Workspace…, Open Folder…, Search Files…), the rows' native Rename / Delete menu, `selected_dir`, New Folder, rename and delete of notes and folders (local: the files, the Trash; remote: the server's note and folder endpoints) |
 | `render.rs` | The view: the sidebar (when shown) over the left 272 pt (the web's --sidebar-w), the page in the rest. Code block backgrounds, quote bars, table rules, hr, bullets, numbers, checkboxes (clickable → `toggle_todo`), `H1`…`H6` labels on the active heading, one `rich()` per piece, strikethrough rules, images below their lines (`El::pixels` of the decoded `rune::Image`, or the placeholder), the translucent selection, and the blinking caret (`ime_cursor()`, kept transparent under a selection), inside a centred column in a Rune scroll viewport (`scroll`). The surface element takes the mouse |
@@ -486,6 +511,24 @@ Clicking a link follows it; its pencil opens it for editing (like the web editor
   Cmd/Option/Ctrl-clicks and double/triple clicks place the caret or select as usual (the first
   click of a double click has already followed the link). A click on an image wrapped in a
   collapsed link follows the link. **Cmd-Enter** follows the link holding (or touching) the caret.
+- **Bare URLs link** (GFM autolink literals: `https://…`, `http://…`, `www.…` at a line or word start, or after `*`, `_`,
+  `~`, `(`; trailing `?!.,:*_~'"`, an unmatched `)` and an entity-like `&x;` left out, so `see https://a.com/x.` links
+  `https://a.com/x`), and so do CommonMark's `<https://…>` / `<a@b.co>` (their `<` `>` hidden like other markers).
+  editor-core parses them as `InlineType::Autolink` (`parser::autolink_literal`, `angle_autolink`): not in code,
+  in a link's text or URL, or an image. The text is the URL, so nothing is hidden and there's
+  no pencil: link colour and underline, the pointing hand, the tooltip (its destination), a click follows it, ⌘↩ follows the one at the caret, as for links
+  (`LinkGeo::auto`, `LinkGeo::raw`: `url::autolink_href`, `www.` as https, an address as mailto). While the caret is
+  in or touching one it's text being edited: clicks there place the caret (it's revealed, so `Geo::links` leaves it
+  out). Agent-written and typed URLs link the same way. The web gets the same parse from its wasm build
+  (`InlineType` "autolink") and draws and opens it like its links.
+- **Pasting a URL** (⌘V, `uploads::paste` → `Editor::paste` → `rules::paste`): when the clipboard's text is one full
+  URL (`http(s)://…`, or `mailto:` with an address; surrounding whitespace trimmed), over a selection on one line it
+  becomes `[selection](url)` (spaces selected at its ends stay outside; a URL with unbalanced parentheses as
+  `(<url>)`); without one (or over several lines) the URL goes in bare when it reads as an autolink literal right
+  there, else as `<url>` (after a letter or `:`, text right after it, a trailing `.`, `mailto:`). The plain paste
+  is one undo step and the link its own (`Edit::then`), so one ⌘Z gives the plain paste back. Inside a code span
+  or block, a link's text or URL (`[a](|` too), or an autolink: plain text. Ctrl-Y (yank) never links.
+  Snapshot `286-paste-url`.
 - **The pencil:** a press expands the link (`Editor::expand_link`), the caret at the end of its
   text (before `]`); the caret or selection leaving the link (`[`…`)`) collapses it again. An
   expanded link has no pencil and clicks in it place the caret as anywhere else. A link around
@@ -707,6 +750,39 @@ Styled after the web app's sidebar (`src/client/app.css` in multiplayer-notepad:
   PageUp/PageDown, Option-PageUp/PageDown, Ctrl-V) needs the viewport, so it's done here: the
   caret moves by the viewport height less two lines, keeping its x (Shift extends), and scrolls
   into view. Ctrl-L scrolls the caret's line to the middle of the view.
+- **Delete Item (⌘D, Edit ▸ Delete Item):** deletes the item at the caret, or every item a selection touches,
+  as one undo step (editor-core `rules::delete_item`, `Command::DeleteItem`; the web gets the same binding from
+  `keymap::bindings`). The item: a **list item or todo** with its continuation lines and nested sub-items (numbered
+  siblings after it that continued its numbering are renumbered: 1, 2, 3 less 2 is 1, 2; "1." everywhere stays); a
+  **paragraph** (its run of lines); a **heading** line (not its section); a **quote** (its run of `>` lines); a **fenced
+  code block** with its fences; a **table row** (the header or delimiter row: the whole table); a blank line. When the item had a blank line on both sides (or the note's
+  edge), one of them goes too, so no double blank lines are left. The caret goes to the start of the next item (a
+  list item: the next sibling at its level, else the previous one, else the next list line), or the previous item's
+  when it was the last. Read-only notes: nothing happens. ⌘D was unbound before (the editor, the menus and the
+  dialogs had nothing on it; Ctrl-D is still forward delete). The menu takes ⌘D before the view, so its action
+  hands the key to `on_key` (`tree_edit::menu_delete_item`): the note gets it only when it has the keys (not the
+  find field, the tree or a dialog). Snapshots `271-delete-item-before` / `272-delete-item-after`.
+- **Move Item (⌥⌘↑ / ⌥⌘↓, Edit ▸ Move Item Up / Move Item Down):** moves the item at the caret, or the run of
+  items a selection touches (the items ⌘D would delete: `rules::selected_lines` / `items_lines` / `item_lines` are
+  shared), above the previous / below the next sibling, as one undo step (`EditKind::Move`: undo puts the selection
+  back instead of selecting re-inserted text); the caret and selection stay on the moved text (a backwards
+  selection stays backwards). editor-core `rules::move_item`, `Command::MoveItem { dir }`, bound in
+  `keymap::bindings`, so the web's `Editor::key` gets it too. A **list item or todo** with its continuation lines
+  and sub-items swaps with the previous / next sibling at its level in the same list (with that one's sub-items;
+  across a loose list's blank lines); the first or last sibling does nothing (it never leaves its list or its
+  parent, nor changes nesting); bullets and numbered items are different lists. Numbered siblings that were in
+  sequence keep it (`1. a 2. b` → `1. b 2. a`, 9/10 too); "1." everywhere stays. A **quote nested in
+  an item** moves among that item's children. A **table body row** swaps with the body row next to it, never above
+  the header and delimiter rows; on the header or delimiter row the whole table is the block. Anything else — a
+  **paragraph**, **heading** (its line, not its section), **quote**, **fenced code block** — swaps with
+  the **top-level block** next to it (`rules::block_lines`: a whole list is one block, a table one), the blank
+  lines between staying where they are. A swap that would merge blocks (a paragraph right under a list joining its
+  last item) puts one blank line between them, or does nothing if that doesn't help. A selection mixing a list and
+  other blocks moves whole blocks. Read-only notes: nothing. Before, ⌥⌘↑/↓ fell through to ⌘↑/↓ (the
+  `Cmd-Up` binding took any Option) and went to the document's start / end; nothing else had them (the macOS key
+  table, the menus, the Go menu, the dialogs). ⌥⇧⌘↑/↓ still extend to the start / end. The menu items hand the
+  key to `on_key` as Delete Item does (`tree_edit::menu_move_item`). Snapshots `290-move-item-before`,
+  `291-move-item-up`, `292-move-item-down`, `293-move-item-paragraph`, `294-move-item-undo` (`scripts/move-item.json`).
 - **Mouse:** `Drag::clicks` counts double and triple clicks (AppKit's interval and slop), `Tx::mods()`
   gives Shift-click; a right-click or Ctrl-click on a sidebar row opens its native menu
   (`El::on_secondary_press`, `Tx::popup_menu`).
@@ -1015,6 +1091,14 @@ carets at its cluster's ends and that a hit at its middle lands on one of them.
 | `118-dialog-open-folder-local` | Open Folder… from a local folder (the path dialog) |
 | `120-dialog-open-guest` | no account anywhere: Open offers Folder and URL, no GitHub repo (a guest can't add one, as on the web) |
 | `123-dialog-open-new-folder-taken` | New → Folder in `crates/app/tests/fixtures` named `notes`: "There's already a “notes” in …" |
+| `285-agent-quote` | `crates/app/tests/fixtures/agent-quote/Agent quote.md` (820x1020): a quote as agents write it, bare `>` lines (no space) between its paragraphs, one bar with blank quote lines and no `>` shown, like the `> ` quote after it; the same under a list item |
+| `286-paste-url` | `--sample --scene paste-url` (820x620; the note `crates/app/tests/fixtures/paste-url/Paste URL.md`): a URL pasted at the end of "Pasted here: " (bare, linked), one pasted over "release notes" (`[release notes](…)`, with its pencil), an agent's bare URL whose full stop stays out, a `[text](url)` link and a `<url>` autolink, a URL in inline code staying text |
+| `290-move-item-before` | `crates/app/tests/fixtures/move-item/Plan.md` (900x620, `scripts/move-item.json`): the caret at the end of "2. Find a hotel", two sub-items under it |
+| `220-nav-header` | `nav-seq.json`: Loose ends, then Ideas, Welcome and people/hiring opened: the header's ‹ on, › grey |
+| `221-nav-back` | ⌘[ twice: back at Ideas, ‹ and › both on |
+| `222-nav-scroll` | `long.md` scrolled down, italic.md opened, ⌘[: long.md at the same scroll and caret |
+| `250-review-mode` | `--remote-demo=review`: review mode on Team notes: Ada's batch (her live " today" and her two commits, back to our commit) tinted, the pill "Reviewing: Ada · 4 lines" |
+| `252-review-off` | the same, Edit ▸ Review Mode: off, no tints, the pill "Review" |
 | `99-remote-cursor` | `--remote-demo`: a remote workspace (globe, "Team / grimoire.example", its tree from the mock server), the note synced ("Saved"), Ada's edit ("today") and her pink caret with her name |
 
 The scripts that open a file (`26`–`31`) now show the sidebar with `crates/app/scripts`' notes.
@@ -1699,6 +1783,30 @@ The header's save status shows nothing on a notice page.
   lines show nothing and don't count; unknown lines show nothing and end a run; fewer than two distinct authors
   in the whole note (live, our guess included): no names. The header's ⋯ ▸ **Show/Hide Authors** and View ▸ **Show Authors** (checked
   while on) toggle it, remembered (`workspaces.json` `showAuthors`, on by default). Local notes have none.
+- **Undo gives a line back to its author:** an edit of ours that brings back a line's exact text (⌘Z, ⇧⌘Z, typing
+  or pasting it back) gives the line back to whoever had that text, at once (`collab::blame::attribute_with` with a
+  `LineHistory`; `LineMemory` keeps the newest 500 non-blank texts edits took away, as the web's
+  `shared/lineauthors.ts`). `LineAuthors` keeps the memory by author id and carries it across blame messages
+  (`renewed`), and the room's next message agrees (grim's server keeps the same history), so the margin doesn't
+  flicker. People and agents alike.
+- **Review mode** (`review_mode.rs`, the web's `src/client/review.ts`): shows the latest batch of changes from the
+  latest author, whoever that is (us, someone else, an agent). Per note, on this Mac only, nothing on the server;
+  the header's **Review** pill (before the mic), Edit ▸ **Review Mode** (checked while on) and ⌥⌘R. Turning it on
+  reads the note's history (`GET history`, 100 commits, newest first) in the background: the latest author is the
+  newest commit's author, except when the note has live edits not committed yet (its text differs from the newest
+  commit's): then whoever made those, by the line authors (`LineAuthors::live_author`: the author of most of the
+  changed lines). Going back while commits have that author (same email when both have one, else the same name,
+  " (guest)" aside; an agent's commits are its agent's), the baseline is the text at the first commit by somebody
+  else (the empty note when that author made it all; a full page by them: its oldest commit). Lines that differ
+  from it (added or changed, not blank; deletions aren't shown) get the green tint (`#34a853` at 13%, behind the
+  text, 8 pt left of the column) with its 2 pt bar (60%); the pill reads "Reviewing: Ada · 4 lines". The baseline
+  stays fixed while it's on and the tints follow the text, so later edits by anyone (a different author's too) are
+  tinted as well, until it's turned off and on again, which recomputes the batch. Off drops it; so does opening
+  another note. Remote notes only. `--review-mode-selftest` (headless, the mock server with a history of its own:
+  undo/redo/typed back giving lines back, the room's message agreeing; Bob's batch back to Alice's commit, the
+  pill, our edit while on, off, on again with our live edit, another note); snapshots `250-review-mode`
+  (`--remote-demo=review`: Ada's live edit and her two commits back to ours, "Reviewing: Ada · 4 lines") and
+  `252-review-off`.
 
 Snapshots: the header moved every note page down 52 pt (97 changed); `99-remote-cursor` and `146-remote-guest`
 show the header and the names (Me / Ada / Me); `148-authors-off` (⋯ ▸ Hide Authors: no names) and
@@ -1874,3 +1982,17 @@ it), `209-find-remote` (`--remote-demo`: `the`, 2 of 4, Ada's line included).
   Matches in folded sections or a collapsed link's URL don't count (nothing unfolds or reveals them). Scrolling a
   match into view doesn't allow for the bar, which can cover a match at the very top of the view. Every frame with
   the bar open finds the matches again (and the bar's count builds the geometry once more); fine for normal notes.
+
+## Back and forward
+
+`nav.rs`, as a browser's history and the web's header buttons: every note opened in the window (the sidebar, a link,
+Search Files, the switcher's other workspace, the note a workspace opens with) is a place after the current one, and
+what was ahead goes; at most 100. The header's ‹ and › (26 pt, left of the breadcrumb; grey and inert when there's
+nowhere to go; tooltips "Back (⌘[)" and "Forward (⌘])"), Go ▸ Back ⌘[ and Go ▸ Forward ⌘] (enabled to match;
+`input::on_key` takes the same keys for headless runs) and the mouse's back and forward buttons (4 and 5, the root's
+`pointer_buttons`) step through them. Leaving a note keeps its caret and scroll (the page's `on_scroll_offset`);
+coming back puts them back (a remote note's again once its live text has synced, `nav_synced`). Places in another
+workspace reopen it (a local folder at that note; a remote one with the note asked for). Notes deleted since are
+skipped (the open workspace's tree, or the file for a local folder); a note or folder renamed here keeps its places
+(`nav_renamed`). ⌘← / ⌘→ stay the editor's (line start and end). Not done: the trackpad's swipe between pages (Rune
+doesn't report swipe gestures).

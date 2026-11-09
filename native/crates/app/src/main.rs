@@ -29,6 +29,7 @@ mod keys;
 mod layout;
 mod links;
 mod menu;
+mod nav;
 mod net;
 mod note;
 mod oc_tools;
@@ -38,6 +39,7 @@ mod remote;
 #[cfg(test)]
 mod remote_qa;
 mod render;
+mod review_mode;
 mod rimages;
 mod sidebar;
 mod sysfont;
@@ -159,6 +161,11 @@ pub struct App {
     /// A tree row being renamed (a note or a folder): its path and the name field.
     /// The menu bar's Show Authors check as installed (`refresh_menu` reinstalls it when it changes).
     pub store_menu_state: bool,
+    /// Review mode for the open note (`review_mode`), its history being read, and Edit ▸ Review Mode's check as
+    /// installed.
+    pub review_mode: Option<review_mode::ReviewMode>,
+    pub review_loading: bool,
+    pub review_menu_state: bool,
     /// The history drawer.
     pub history: history::HistoryPanel,
     /// The header's ⋯ menu is open (the button shows pressed).
@@ -207,6 +214,8 @@ pub struct App {
     pub ask_git: bool,
     /// The experimental voice session (`voice`).
     pub voice: voice::Voice,
+    /// Back and forward through the notes opened (`nav`).
+    pub nav: nav::Nav,
 }
 
 /// A stand-in folder picker (tests): a path, `None` when cancelled, an error when it can't run.
@@ -275,6 +284,9 @@ impl App {
             history: history::HistoryPanel::default(),
             header_menu_open: false,
             store_menu_state: true,
+            review_mode: None,
+            review_loading: false,
+            review_menu_state: false,
             watch: Arc::default(),
             opener: remote::open_browser,
             dialog: None,
@@ -295,6 +307,7 @@ impl App {
             committer: None,
             ask_git: false,
             voice: Default::default(),
+            nav: Default::default(),
         }
     }
 
@@ -314,6 +327,7 @@ impl App {
 
     /// Open a local folder as the workspace (its note open last, else its newest), leaving the open one.
     pub fn open_local(&mut self, dir: PathBuf, tx: &mut Tx) {
+        self.nav_leave();
         self.leave_workspace();
         let root = std::fs::canonicalize(&dir).unwrap_or(dir);
         let (entries, _) = files::scan(&root);
@@ -408,6 +422,7 @@ impl App {
         if self.path.as_deref().is_some_and(|p| same_file(p, &path)) {
             return;
         }
+        self.nav_leave();
         if self.remote.is_some() {
             let Some(rel) = self.root.as_ref().and_then(|r| path.strip_prefix(r).ok()).map(|r| r.to_string_lossy().into_owned()) else { return };
             self.save_folds();
@@ -428,6 +443,7 @@ impl App {
             self.sent = self.ed.text().to_string();
             self.path = Some(path);
             self.history_retarget(tx);
+            self.nav_arrived(tx);
             return;
         }
         // Before reading: `path` may be the open note under another name.
@@ -468,6 +484,7 @@ impl App {
             let rel = self.rel_note();
             self.store.set_note(&ws, rel);
         }
+        self.nav_arrived(tx);
     }
 
     /// Remember the open note's folds (across launches, as the web's localStorage). A remote note's only once
@@ -754,6 +771,20 @@ const SCENES: &[Scene] = &[
     // after " caf" typed at the end of "Draw it with Rune": a dead key's ´ marked, then é committed.
     ("ime-preedit", |app| ime_scene(app, false)),
     ("ime-commit", |app| ime_scene(app, true)),
+    // Cmd-V's path (`uploads::paste`) with a URL on the clipboard: at the end of "Pasted here: " (bare, a link) and
+    // over "release notes" (`[release notes](url)`); the caret then at the end. On tests/fixtures/paste-url's note.
+    ("paste-url", |app| {
+        app.ed = note::Ed::local(include_str!("../tests/fixtures/paste-url/Paste URL.md"));
+        let mut tx = Tx::default();
+        let p = find_text(app, "Pasted here: ") + "Pasted here: ".len();
+        app.ed.set_selection(Sel::caret(p));
+        uploads::paste(app, &rune::ClipboardContent::new("https://github.com/anomalyco/grim/pull/42\n"), &mut tx);
+        let a = find_text(app, "release notes");
+        app.ed.set_selection(Sel::new(a, a + "release notes".len()));
+        uploads::paste(app, &rune::ClipboardContent::new("https://grimnotes.app/releases"), &mut tx);
+        let end = app.ed.text().len();
+        app.ed.set_selection(Sel::caret(end));
+    }),
 ];
 
 fn ime_scene(app: &mut App, commit: bool) {
@@ -822,12 +853,39 @@ fn main() {
         eprintln!("keychain selftest: set {set:?}; read back {}; after delete {}", got.as_deref() == Some("gmt_selftest"), workspaces::keychain::get(&server).is_none());
         std::process::exit(if set.is_ok() { 0 } else { 1 });
     }
+    // `--secrets-selftest` (Grim Beta): write, read and delete a dummy secret in a temporary secrets.json, check
+    // its permissions (file 0600, folder 0700) and header, and quit
+    #[cfg(feature = "beta")]
+    if rune::extra_args().iter().any(|a| a == "--secrets-selftest") {
+        std::process::exit(secrets_selftest());
+    }
+    // `--import-keychain-secrets` (Grim Beta): copy the sign-ins, OpenCode pairing and voice keys an older beta kept
+    // in the Keychain (service "Grimoire Beta") into secrets.json once; macOS asks for each item
+    #[cfg(feature = "beta")]
+    if rune::extra_args().iter().any(|a| a == "--import-keychain-secrets") {
+        let store = workspaces::Store::load(workspaces::default_support_dir());
+        let mut accounts: Vec<String> = vec![actions::DEFAULT_SERVER.trim_end_matches('/').to_string()];
+        for s in store.recent.iter().filter_map(|(w, _)| if let workspaces::WsRef::Remote { server, .. } = w { Some(server.clone()) } else { None }).chain(store.servers.iter().map(|s| s.url.clone())) {
+            if !accounts.contains(&s) {
+                accounts.push(s);
+            }
+        }
+        accounts.extend([opencode::KEYCHAIN_ACCOUNT, oc_tools::DELEGATOR_ACCOUNT, "voice.openai", "voice.opencode-console"].map(String::from));
+        let done = workspaces::keychain::import(&accounts);
+        for (a, r) in &done {
+            eprintln!("import-keychain-secrets: {a}: {}", if let Err(e) = r { format!("not copied ({e})") } else { "copied".into() });
+        }
+        eprintln!("import-keychain-secrets: {} of {} accounts were in the Keychain", done.len(), accounts.len());
+        std::process::exit(if done.iter().all(|(_, r)| r.is_ok()) { 0 } else { 1 });
+    }
     // `--app-variant`: which app this build is (Grim or Grim Beta), its server, Keychain service and folders, then quit
     if rune::extra_args().iter().any(|a| a == "--app-variant") {
         let home = std::env::var_os("HOME").unwrap_or_default();
         println!("name: {}", variant::NAME);
         println!("server: {}", actions::DEFAULT_SERVER.trim_end_matches('/'));
         println!("keychain service: {}", variant::KEYCHAIN_SERVICE);
+        #[cfg(feature = "beta")]
+        println!("secrets: {}", workspaces::keychain::path().map(|p| p.display().to_string()).unwrap_or_default());
         println!("support: {}", workspaces::default_support_dir().map(|p| p.display().to_string()).unwrap_or_default());
         println!("caches: {}", variant::cache_path(&home, "").display());
         std::process::exit(0);
@@ -835,6 +893,10 @@ fn main() {
     // `--voice-selftest[=console|openai|server|loopback]`: a whole GPT-Live session without a window or audio devices (`voice::selftest`), then quit
     if rune::extra_args().iter().any(|a| a.starts_with("--voice-selftest")) {
         std::process::exit(voice::selftest::run(rune::extra_args()));
+    }
+    // `--review-mode-selftest`: undo giving lines back and review mode, on the mock server (`review_mode::selftest`)
+    if rune::extra_args().iter().any(|a| a == "--review-mode-selftest") {
+        std::process::exit(review_mode::selftest());
     }
     // `--git-selftest`: the Git dialogs and automatic commits against temporary folders, then quit
     if rune::extra_args().iter().any(|a| a == "--git-selftest") {
@@ -948,7 +1010,7 @@ fn main() {
     let app_recheck = recheck.clone();
     // The page draws its own editor: the input method composes for it (the caret has `ime_cursor`).
     let mut app = rune::App::new(spec).on_ime(input::on_ime);
-    for item in tree_edit::menu_items(true) {
+    for item in tree_edit::menu_items(true, false, false, false) {
         app = app.menu_item(item);
     }
     let handle = app.handle();
@@ -1352,4 +1414,39 @@ mod tests {
         assert!(!input::on_ime(&mut app, &rune::Ime::Preedit("か".into(), None), &mut tx));
         assert_eq!(app.marked, None);
     }
+}
+
+/// `--secrets-selftest`: Grim Beta's file store round trip in a temporary folder (no values printed).
+#[cfg(feature = "beta")]
+fn secrets_selftest() -> i32 {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("grim-beta-secrets-selftest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let file = dir.join("support").join(workspaces::keychain::FILE);
+    workspaces::keychain::set_path(file.clone());
+    let mode = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
+    let mut ok = true;
+    let mut check = |c: bool, what: &str| {
+        eprintln!("secrets selftest: {} {what}", if c { "ok  " } else { "FAIL" });
+        ok &= c;
+    };
+    let server = "https://secrets-selftest.invalid";
+    let set = workspaces::keychain::set(server, "gmt_selftest_1");
+    check(set.is_ok(), &format!("set: {set:?}"));
+    check(workspaces::keychain::get(server).as_deref() == Some("gmt_selftest_1"), "read back");
+    check(workspaces::keychain::set(opencode::KEYCHAIN_ACCOUNT, "eyJ1cmwiOiJ4In0").is_ok() && workspaces::keychain::set("voice.openai", "sk test key").is_ok(), "a second and third secret");
+    check(workspaces::keychain::get_secret("voice.openai").as_deref() == Some("sk test key") && workspaces::keychain::get("voice.openai").is_none(), "get_secret reads a non-token, get doesn't");
+    check(workspaces::keychain::set(server, "gmt_selftest_2").is_ok() && workspaces::keychain::get(server).as_deref() == Some("gmt_selftest_2"), "overwrite");
+    check(mode(&file) == 0o600, &format!("file mode {:o}", mode(&file)));
+    check(mode(file.parent().unwrap()) == 0o700, &format!("folder mode {:o}", mode(file.parent().unwrap())));
+    let v: serde_json::Value = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    check(v["_comment"] == "Grim Beta development secrets (staging only)", "header comment");
+    check(workspaces::keychain::get("_comment").is_none(), "the header isn't a secret");
+    let leftovers = std::fs::read_dir(file.parent().unwrap()).map(|d| d.count()).unwrap_or(0);
+    check(leftovers == 1, &format!("no temp files left ({leftovers} entries)"));
+    workspaces::keychain::remove(server);
+    check(workspaces::keychain::get(server).is_none() && workspaces::keychain::get_secret(opencode::KEYCHAIN_ACCOUNT).is_some(), "remove takes only that one");
+    check(workspaces::keychain::describe(opencode::KEYCHAIN_ACCOUNT).starts_with("found in"), "describe");
+    let _ = std::fs::remove_dir_all(&dir);
+    if ok { 0 } else { 1 }
 }

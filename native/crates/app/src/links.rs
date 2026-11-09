@@ -682,6 +682,39 @@ mod tests {
         assert_eq!(app.ed.text(), std::fs::read_to_string(fixture().join("Home.md")).unwrap(), "no line break typed");
     }
 
+    /// Bare URLs and `<url>` autolinks: link-coloured, a click opens them, the tooltip's destination; not while the
+    /// caret is in one (then clicks place the caret to edit it).
+    #[test]
+    fn bare_urls_open_like_links() {
+        let _ = fixture();
+        let text = "see https://example.com/a. and www.example.org or <https://ex.com/b> `https://code.com`\n\nend";
+        let mut app = App::new(text, None, true);
+        app.ed.set_selection(Sel::caret(text.len()));
+        let geo = |app: &App| app.geometry().links(app.ed.doc(), &app.ed.reveal());
+        let raws: Vec<String> = geo(&app).iter().filter(|g| g.auto && g.pencil.is_none()).map(|g| g.raw(app.ed.text())).collect();
+        assert_eq!(raws, ["https://example.com/a", "https://www.example.org", "https://ex.com/b"]);
+        let mid = |app: &App, k: usize| {
+            let r = geo(app)[k].rects[0];
+            (PAD_L + r[0] + r[2] / 2.0, PAD_T + r[1] + r[3] / 2.0)
+        };
+        let at = mid(&app, 0);
+        click(&mut app, at, 1, Mods::default());
+        assert_eq!(app.link_log, vec!["open https://example.com/a"]);
+        assert_eq!(app.ed.selection(), Sel::caret(text.len()), "the caret stays");
+        let at = mid(&app, 1);
+        click(&mut app, at, 1, Mods::default());
+        assert_eq!(app.link_log.last().unwrap(), "open https://www.example.org/");
+        let at = mid(&app, 2);
+        click(&mut app, at, 1, Mods::default());
+        assert_eq!(app.link_log.last().unwrap(), "open https://ex.com/b");
+        // the caret in the first: it's text to edit, a click there places the caret
+        app.ed.set_selection(Sel::caret(8));
+        assert_eq!(geo(&app).len(), 2);
+        let n = app.link_log.len();
+        click(&mut app, at, 1, Mods::default());
+        assert_eq!(app.link_log.len(), n + 1, "the others still open");
+    }
+
     #[test]
     fn linked_images_open_their_link() {
         let _ = fixture();

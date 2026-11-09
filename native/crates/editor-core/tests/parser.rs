@@ -252,7 +252,8 @@ fn links() {
     assert_eq!(sl(s, link.url.unwrap()), "http://x.y");
     assert_eq!(link.markers.iter().map(|&m| sl(s, m)).collect::<Vec<_>>(), vec!["[", "](", ")"]);
     assert!(els.iter().any(|e| e.ty == I::Italic));
-    assert_eq!(inl("[a](http://x.y"), vec![]);
+    // unclosed: no link; its URL alone is an autolink literal (GFM: after "(")
+    assert_eq!(inl("[a](http://x.y"), vec![e(I::Autolink, "http://x.y")]);
 }
 
 #[test]

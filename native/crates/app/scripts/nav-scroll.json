@@ -1,0 +1,11 @@
+{
+ "events": [
+  {"t": 0.3, "type": "tap", "x": 600, "y": 300},
+  {"t": 0.5, "type": "scroll", "x": 600, "y": 300, "dy": -900, "dur": 0.3},
+  {"t": 1.2, "type": "mark", "name": "scrolled"},
+  {"t": 1.4, "type": "tap", "key": "row:italic.md"},
+  {"t": 1.8, "type": "mark", "name": "other"},
+  {"t": 2.0, "type": "key", "name": "[", "cmd": true},
+  {"t": 2.6, "type": "mark", "name": "back"}
+ ]
+}

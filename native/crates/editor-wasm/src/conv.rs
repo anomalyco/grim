@@ -224,6 +224,7 @@ pub fn inline_name(t: InlineType) -> &'static str {
         InlineType::Highlight => "highlight",
         InlineType::Code => "code",
         InlineType::Link => "link",
+        InlineType::Autolink => "autolink",
         InlineType::Tag => "tag",
         InlineType::Image => "image",
     }

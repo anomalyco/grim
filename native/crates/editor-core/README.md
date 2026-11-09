@@ -40,7 +40,7 @@ DOM-free parts of view/input/render). It has no UI. The spec it implements is
 let mut ed = Editor::new(markdown);
 ed.insert_text("x");             // typed text / IME commit (smart typing, conversions, "> " rules)
 ed.key(key, mods, &layout);      // non-text keys and shortcuts through the keymap; returns the Command run
-ed.paste(&clipboard_text);       // raw markdown, own undo step
+ed.paste(&clipboard_text);       // raw markdown, own undo step; one URL becomes a link (a second step)
 let s = ed.cut(); let s = ed.copy();
 ed.mouse_down(&layout, x, y, click_count, shift);  ed.mouse_drag(&layout, x, y);
 ed.toggle_todo(line_index);      // a click on a todo checkbox token
@@ -172,6 +172,7 @@ Each source line produces one `LineView`:
   - `Highlight` (`==`)
   - `Code` (pill)
   - `Link`
+  - `Autolink`: a bare URL (GFM autolink literal) or `<url>`; its text is the URL (`url::autolink_href`)
   - `Tag` (`#tag`)
 - `Marker`: inline syntax (`**`, `[`, `](`, `)`, backticks…). When `hidden`, draw it at zero width.
   Otherwise draw it in the element's font and the marker color. `el` is the element index.
@@ -214,13 +215,15 @@ There are two tables. `Editor::key` uses `keymap::bindings()` unless `set_key_ta
 | Ctrl-Left/Right | not handled (system) |
 | Up/Down | visual line with goal x (needs the `Layout`) |
 | Option-Up/Down | line start / previous line, line end / next line |
-| Cmd-Up/Down | document start / end |
+| Cmd-Up/Down | document start / end (Cmd-Option-Up/Down: Move Item, below) |
 | Home / End | `ScrollToStart` / `ScrollToEnd`, which the UI scrolls; the caret doesn't move (Mac behaviour) |
 | Tab / Shift-Tab | context-dependent: nest a list item, insert a literal tab, indent a paragraph, move to the next table cell / outdent |
 | Enter / Shift-Enter | smart paragraph (list continue/exit, fence auto-close, table rows) / raw newline |
 | Backspace, Option-, Cmd- | character (removes a whole token at text start) / word / to text start |
 | Delete (fn-Backspace), Option-, Cmd- | forward character / word / to line end |
 | Ctrl-H / Ctrl-D / Ctrl-K | backspace / forward delete / delete to line end |
+| Cmd-D | delete the item at the caret, or every item a selection touches (`rules::delete_item`), one undo step: a list item or todo with its continuation lines and nested items (numbered siblings that continued its numbering are renumbered), a paragraph (its run of lines), a heading line, a quote, a fenced code block with its fences, a table row (the header or delimiter row: the table), a blank line. With a blank line on both sides, one goes too. The caret: the next item's start (a list item: the next sibling at its level, else the previous one), else the previous item's |
+| Cmd-Option-Up / Down | move the item at the caret, or the items a selection touches, above the previous / below the next sibling (`rules::move_item`), one undo step (undo puts the selection back); the selection stays on the moved text. A list item or todo with its continuation lines and sub-items swaps with its sibling at the same level in the same list (never out of it or its parent: the first / last does nothing; numbered siblings numbered in sequence keep it); a quote nested in an item, among that item's children; a table body row with the body row next to it (never above the header); anything else (paragraph, heading line, quote, fenced code block, a table from its header) with the top-level block next to it, a whole list being one, the blank lines between staying put (a paragraph that would join a list gets a blank line). Cmd-Option-Shift-Up / Down still extend to the document's start / end |
 
 ### The macOS table (`macos_keys`)
 

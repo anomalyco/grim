@@ -79,6 +79,10 @@ pub enum InlineType {
     /// `![alt](src)` / `![alt](src "title")`: the whole source collapses (the image is drawn below
     /// the line); the alt text is plain text.
     Image,
+    /// A URL that is its own text: a GFM autolink literal (`https://…`, `http://…`, `www.…`; no markers) or a
+    /// CommonMark autolink (`<scheme:…>`, `<a@b.co>`; its `<` and `>` are markers). The content is the URL
+    /// (`url::autolink_href` for where it goes); `url` stays None: nothing of it is hidden.
+    Autolink,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -226,9 +230,20 @@ fn numbered(s: &str) -> Option<(u32, usize)> {
     }
 }
 
-/// `^(?:[-*] |\d{1,9}\. |> )`
-fn list_start(s: &str) -> bool {
-    bullet(s) || numbered(s).is_some() || s.starts_with("> ")
+/// `^> ` -> 2; with `bare` (the line continues a quote), also `^>[ \t\r]*$` -> 1: a `>` alone on its line
+/// (CommonMark's blank quote line; agents write it without the space, CRLF text with a `\r`). Not
+/// after a quote, a bare `>` stays text (what undoing a typed `>`'s auto-space leaves).
+fn quote_marker(s: &str, bare: bool) -> Option<usize> {
+    if s.starts_with("> ") {
+        Some(2)
+    } else {
+        (bare && s.starts_with('>') && s.bytes().skip(1).all(blank_byte)).then_some(1)
+    }
+}
+
+/// `^(?:[-*] |\d{1,9}\. |> )` (and a bare `>` continuing a quote)
+fn list_start(s: &str, bare_quote: bool) -> bool {
+    bullet(s) || numbered(s).is_some() || quote_marker(s, bare_quote).is_some()
 }
 
 /// `^ {0,3}(`{3,}|~{3,})(.*)$` -> (fence char, run length, info string).
@@ -279,11 +294,13 @@ pub struct BlockState {
     /// Space-indented lists: 2 spaces per level, or 4 when the list steps by 4.
     space_unit: usize,
     prev_list_spaces: isize,
+    /// The line before is a quote line, at this indentation (a bare `>` continues it).
+    quote: Option<usize>,
 }
 
 impl Default for BlockState {
     fn default() -> Self {
-        BlockState { fence: None, space_unit: 2, prev_list_spaces: -1 }
+        BlockState { fence: None, space_unit: 2, prev_list_spaces: -1, quote: None }
     }
 }
 
@@ -461,6 +478,7 @@ fn shift_line(l: &mut Line, d: isize, dl: isize) {
 fn block_line(t: &str, i: usize, from: usize, st: &mut BlockState, lines: &mut Vec<Line>, base: usize) {
     let to = from + t.len();
     let mut line = Line::new(i, from, to);
+    let after_quote = st.quote.take();
 
     if let Some((fc, flen, fstart)) = st.fence {
         line.block_start = Some(fstart);
@@ -494,7 +512,7 @@ fn block_line(t: &str, i: usize, from: usize, st: &mut BlockState, lines: &mut V
     let ws_len = t.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
     let ws = &t[..ws_len];
     let indent_tok = |f: usize, t: usize| Token { kind: TokenKind::Indent, from: f, to: t };
-    if ws.contains(' ') && list_start(&t[ws_len..]) {
+    if ws.contains(' ') && list_start(&t[ws_len..], after_quote.is_some()) {
         // a list line indented with spaces (and maybe tabs): tabs and space units are indent
         // tokens; leftover spaces belong to the block token
         let spaces = ws.bytes().filter(|&b| b == b' ').count() as isize;
@@ -532,7 +550,7 @@ fn block_line(t: &str, i: usize, from: usize, st: &mut BlockState, lines: &mut V
             ind += 1;
         }
         line.indent = ind;
-        if list_start(&t[ind..]) {
+        if list_start(&t[ind..], after_quote.is_some()) {
             st.prev_list_spaces = 0;
         } else if !is_blank(t) {
             st.prev_list_spaces = -1;
@@ -568,10 +586,11 @@ fn block_line(t: &str, i: usize, from: usize, st: &mut BlockState, lines: &mut V
         line.number = number;
         tok_len = len + lead;
         push(&mut line, TokenKind::Numbered, tok_len);
-    } else if rest.starts_with("> ") {
+    } else if let Some(len) = quote_marker(rest, after_quote == Some(line.indent)) {
         line.ty = BlockType::Quote;
-        tok_len = 2 + lead;
+        tok_len = len + lead;
         push(&mut line, TokenKind::Quote, tok_len);
+        st.quote = Some(line.indent);
     }
     line.text_from = from + ind + tok_len;
     lines.push(line);
@@ -868,7 +887,7 @@ pub fn parse_inline(src: &str, start: usize, end: usize) -> (Vec<InlineEl>, Vec<
 pub fn parse_inline_with(src: &str, start: usize, end: usize, images: bool) -> (Vec<InlineEl>, Vec<usize>) {
     let mut elements = Vec::new();
     let mut escapes = Vec::new();
-    scan(src, start, end, &mut elements, &mut escapes, images);
+    scan(src, start, end, &mut elements, &mut escapes, images, true);
     elements.sort_by(|a, b| a.from.cmp(&b.from).then(b.to.cmp(&a.to)));
     (elements, escapes)
 }
@@ -881,7 +900,9 @@ fn run_length(s: &[u8], i: usize, end: usize, ch: u8) -> usize {
     j - i
 }
 
-fn scan(src: &str, start: usize, end: usize, out: &mut Vec<InlineEl>, escapes: &mut Vec<usize>, images: bool) {
+/// `autolinks`: find autolinks (not inside a link's text: links don't nest).
+#[allow(clippy::too_many_arguments)]
+fn scan(src: &str, start: usize, end: usize, out: &mut Vec<InlineEl>, escapes: &mut Vec<usize>, images: bool, autolinks: bool) {
     let s = src.as_bytes();
     let mut stack: Vec<Delim> = Vec::new();
     let mut i = start;
@@ -956,9 +977,35 @@ fn scan(src: &str, start: usize, end: usize, out: &mut Vec<InlineEl>, escapes: &
             i += 1;
             continue;
         }
+        if autolinks
+            && c == b'<'
+            && let Some((c0, c1)) = angle_autolink(src, i, end)
+        {
+            out.push(InlineEl {
+                ty: InlineType::Autolink,
+                from: i,
+                to: c1 + 1,
+                content_from: c0,
+                content_to: c1,
+                markers: vec![(i, c0), (c1, c1 + 1)],
+                url: None,
+                src: None,
+                title: None,
+            });
+            i = c1 + 1;
+            continue;
+        }
+        if autolinks
+            && matches!(c, b'h' | b'H' | b'w' | b'W')
+            && let Some(j) = autolink_literal(src, start, i, end)
+        {
+            out.push(InlineEl { ty: InlineType::Autolink, from: i, to: j, content_from: i, content_to: j, markers: vec![], url: None, src: None, title: None });
+            i = j;
+            continue;
+        }
         if c == b'[' {
             if let Some(LinkMatch { text_end, end: m_end, .. }) = match_link(src, i, end, false) {
-                scan(src, i + 1, text_end, out, escapes, images);
+                scan(src, i + 1, text_end, out, escapes, images, false);
                 out.push(InlineEl {
                     ty: InlineType::Link,
                     from: i,
@@ -1099,6 +1146,91 @@ fn handle_delim(s: &str, start: usize, end: usize, ch: u8, pos: usize, n: usize,
     if d.len > 0 && can_open {
         stack.push(d);
     }
+}
+
+/// A GFM autolink literal starting at `i` (`http://`, `https://` or `www.`, any case): its end, trailing
+/// punctuation left out (`?!.,:*_~'"`, a `)` without its `(`, an entity-like `&x;`). Only at the start of the
+/// text, after whitespace or after `*`, `_`, `~`, `(`; the domain is letters, digits, `-`, `_` and dots, without
+/// `_` in its last two parts (`http(s)://` takes one without dots too: `http://localhost:3000`).
+pub fn autolink_literal(src: &str, start: usize, i: usize, end: usize) -> Option<usize> {
+    if i > start && !char_before(src, i).is_some_and(|c| is_ws(c) || matches!(c, '*' | '_' | '~' | '(')) {
+        return None;
+    }
+    let rest = src.get(i..end)?;
+    let lower = |p: &str| rest.len() >= p.len() && rest.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes());
+    let (dom_from, www) = if lower("https://") {
+        (i + 8, false)
+    } else if lower("http://") {
+        (i + 7, false)
+    } else if lower("www.") {
+        (i, true)
+    } else {
+        return None;
+    };
+    let stop = |c: char| is_ws(c) || c == '<';
+    let mut j = i;
+    while let Some(c) = char_at(src, j).filter(|_| j < end) {
+        if stop(c) {
+            break;
+        }
+        j += c.len_utf8();
+    }
+    // trailing punctuation isn't part of it
+    while let Some(last) = char_before(src, j).filter(|_| j > dom_from) {
+        let link = &src[i..j];
+        match last {
+            '?' | '!' | '.' | ',' | ':' | '*' | '_' | '~' | '\'' | '"' => j -= 1,
+            ')' if link.matches(')').count() > link.matches('(').count() => j -= 1,
+            ';' => {
+                let body = &link[..link.len() - 1];
+                let name = body.len() - body.trim_end_matches(|c: char| c.is_ascii_alphanumeric()).len();
+                if name > 0 && body[..body.len() - name].ends_with('&') {
+                    j -= name + 2;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    // the domain: up to the first character that can't be in one
+    let mut d = dom_from;
+    while let Some(c) = char_at(src, d).filter(|_| d < j) {
+        if !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+            break;
+        }
+        d += c.len_utf8();
+    }
+    let domain = src[dom_from..d].trim_end_matches('.');
+    if domain.is_empty() || !domain.chars().next().is_some_and(char::is_alphanumeric) {
+        return None;
+    }
+    let parts: Vec<&str> = domain.split('.').collect();
+    if parts.iter().rev().take(2).any(|p| p.contains('_')) || (www && parts.len() < 2) {
+        return None;
+    }
+    Some(j)
+}
+
+/// A CommonMark autolink `<scheme:…>` (a scheme of 2–32 letters, digits, `+`, `.`, `-`; no spaces, `<` or
+/// controls) or `<local@domain>` at `i` (the `<`): its content's range (the `>` is at its end).
+pub fn angle_autolink(src: &str, i: usize, end: usize) -> Option<(usize, usize)> {
+    let s = src.as_bytes();
+    let c0 = i + 1;
+    let close = (c0..end).find(|&k| matches!(s[k], b'>' | b'<') || s[k] <= b' ' || s[k] == 0x7f)?;
+    if s[close] != b'>' || close == c0 {
+        return None;
+    }
+    let inner = &src[c0..close];
+    let scheme_len = inner.bytes().take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-')).count();
+    let uri = inner.as_bytes()[0].is_ascii_alphabetic() && (2..=32).contains(&scheme_len) && inner.as_bytes().get(scheme_len) == Some(&b':');
+    let email = || {
+        let (local, domain) = inner.split_once('@')?;
+        let local_ok = !local.is_empty() && local.bytes().all(|b| b.is_ascii_alphanumeric() || b".!#$%&'*+/=?^_`{|}~-".contains(&b));
+        let label_ok = |l: &str| !l.is_empty() && l.len() <= 63 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') && !l.starts_with('-') && !l.ends_with('-');
+        (local_ok && domain.split('.').all(label_ok)).then_some(())
+    };
+    (uri || email().is_some()).then_some((c0, close))
 }
 
 struct LinkMatch {

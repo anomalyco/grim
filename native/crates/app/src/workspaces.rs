@@ -639,7 +639,8 @@ impl Store {
 // ---- tokens ----
 
 /// Where app tokens are kept: the Keychain (generic passwords, service "Grimoire", account = the server's
-/// origin), with a 0600 `tokens.json` in the support folder as the fallback; or only that file.
+/// origin), with a 0600 `tokens.json` in the support folder as the fallback; or only that file. In Grim Beta
+/// "the Keychain" is its `secrets.json` file (`keychain` below).
 #[derive(Clone, Debug)]
 pub enum Tokens {
     Keychain { fallback: Option<PathBuf> },
@@ -730,11 +731,108 @@ fn cache() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, O
     CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The app's secrets: the Keychain (`os_keychain`) in Grim; a file in Grim Beta.
+#[cfg(not(feature = "beta"))]
+pub use os_keychain as keychain;
+
+/// Grim Beta's secrets (app tokens, the OpenCode pairing and voice session, voice keys), with `os_keychain`'s API:
+/// `secrets.json` in its support folder (the folder 0700, the file 0600, written whole to a temp file then renamed).
+/// Grim Beta is ad-hoc signed, so every build is a new code identity that Keychain items' access lists don't
+/// trust, and macOS would ask on every launch. Nothing comes over from the Keychain by itself (reading it would
+/// ask again): sign in and pair once more, or run `--import-keychain-secrets` once (`import`).
+#[cfg(feature = "beta")]
+pub mod keychain {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use serde_json::Value;
+
+    pub const FILE: &str = "secrets.json";
+    const NOTE_KEY: &str = "_comment";
+    const NOTE: &str = "Grim Beta development secrets (staging only)";
+
+    fn store() -> MutexGuard<'static, Option<PathBuf>> {
+        static PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+        PATH.get_or_init(|| Mutex::new(super::default_support_dir().map(|d| d.join(FILE)))).lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The file (`--secrets-selftest` points it at a temporary folder).
+    pub fn path() -> Option<PathBuf> {
+        store().clone()
+    }
+
+    pub fn set_path(p: PathBuf) {
+        *store() = Some(p);
+    }
+
+    pub fn get(account: &str) -> Option<String> {
+        get_secret(account).filter(|t| super::valid_token(t))
+    }
+
+    pub fn get_secret(account: &str) -> Option<String> {
+        if account == NOTE_KEY {
+            return None;
+        }
+        store().as_deref().and_then(|p| super::file_get(p, account))
+    }
+
+    pub fn set(account: &str, value: &str) -> Result<&'static str, String> {
+        if account == NOTE_KEY {
+            return Err("reserved name".into());
+        }
+        let g = store();
+        let p = g.as_deref().ok_or("no support folder")?;
+        let mut m = super::file_read(p);
+        m.insert(NOTE_KEY.into(), Value::String(NOTE.into()));
+        m.insert(account.into(), Value::String(value.into()));
+        write(p, m).map(|()| "Grim Beta secrets file (0600)")
+    }
+
+    pub fn remove(account: &str) {
+        let g = store();
+        let Some(p) = g.as_deref() else { return };
+        let mut m = super::file_read(p);
+        if account != NOTE_KEY && m.remove(account).is_some() {
+            let _ = write(p, m);
+        }
+    }
+
+    pub fn describe(account: &str) -> String {
+        match (path(), get_secret(account)) {
+            (Some(p), Some(_)) => format!("found in {}", p.display()),
+            _ => "not found".into(),
+        }
+    }
+
+    fn write(p: &Path, m: serde_json::Map<String, Value>) -> Result<(), String> {
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+        }
+        super::file_write(p, m)
+    }
+
+    /// `--import-keychain-secrets`: copy these accounts' items from the beta's Keychain service into the file, once
+    /// (macOS asks for each item that's there). Whether each was there; never the values.
+    pub fn import(accounts: &[String]) -> Vec<(String, Result<(), String>)> {
+        accounts
+            .iter()
+            .filter_map(|a| {
+                let v = super::os_keychain::get_secret(a)?;
+                Some((a.clone(), set(a, &v).map(|_| ())))
+            })
+            .collect()
+    }
+}
+
 /// The app's own Keychain items (Security.framework): generic passwords, service "Grimoire", account = the
 /// server's origin, accessible after first unlock on this device only
 /// (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, never synced or migrated to another Mac). In the data
-/// protection keychain when macOS allows this build to use it, else the login keychain.
-pub mod keychain {
+/// protection keychain when macOS allows this build to use it, else the login keychain. Grim Beta only reads
+/// them for `--import-keychain-secrets`.
+#[cfg_attr(feature = "beta", allow(dead_code))]
+pub mod os_keychain {
     use core_foundation::base::TCFType;
     use core_foundation::string::{CFString, CFStringRef};
     use security_framework::passwords::{self, PasswordOptions};
@@ -806,6 +904,10 @@ pub mod keychain {
 /// An item an older build made through `/usr/bin/security` (its ACL trusts that tool, so reading it there asks
 /// nothing).
 fn cli_get(server: &str) -> Option<String> {
+    // (Grim Beta never made these, and asking `security` for its own items would prompt)
+    if cfg!(feature = "beta") {
+        return None;
+    }
     let out = Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", server, "-w"])
         .stderr(Stdio::null())
@@ -816,6 +918,9 @@ fn cli_get(server: &str) -> Option<String> {
 }
 
 fn cli_remove(server: &str) {
+    if cfg!(feature = "beta") {
+        return;
+    }
     let _ = Command::new("/usr/bin/security")
         .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", server])
         .stdout(Stdio::null())

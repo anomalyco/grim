@@ -49,7 +49,23 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     };
     // Clipped to its own area: nothing slides under the sidebar (the column squeezes down to
     // MIN_TEXT_W beside it, and wide tables or code can still be wider than that).
-    let mut root = el().key("root").w_full().h_full().fill(c(PAPER)).child(
+    // the mouse's back and forward buttons (4 and 5), anywhere in the window
+    let mut root = el()
+        .key("root")
+        .w_full()
+        .h_full()
+        .fill(c(PAPER))
+        .pointer_buttons([rune::PointerButton::Back, rune::PointerButton::Forward])
+        .on_drag(|app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == rune::Phase::Down {
+                match tx.button() {
+                    rune::PointerButton::Back => app.go_back(tx),
+                    rune::PointerButton::Forward => app.go_forward(tx),
+                    _ => {}
+                }
+            }
+        })
+        .child(
         col()
             .key("editor")
             .absolute(x0, 0.0)
@@ -108,6 +124,8 @@ fn editor(app: &App, pane_w: f32) -> El {
     let sel = app.ed.selection();
     let marked = app.marked.as_ref().filter(|_| !app.search.input.focused && !(app.find.open && app.find.input.focused)).and_then(|(m, cur)| geo.splice_marked(sel.from(), m, *cur));
     let mut kids = Kids { main: Vec::new(), wide: &geo.wide, inner: vec![Vec::new(); geo.wide.len()], over: vec![Vec::new(); geo.wide.len()] };
+    // review mode's tints: under everything else (the text, the selection)
+    kids.main.extend(crate::authors::tints(app, &geo));
     blocks(&geo, &mut kids);
     gutter(&geo, &mut kids.main);
     folds(app, &geo, &mut kids.main);
@@ -143,12 +161,14 @@ fn editor(app: &App, pane_w: f32) -> El {
         .on_drop_move(drop::on_drop_move)
         .on_drop_hover(drop::on_drop_hover)
         .children(kids);
+    let scrolled = app.nav.scroll.clone();
     col()
         .key("scroll")
         .w_full()
         .grow(1.0)
         .min_h(0.0)
         .scroll(ScrollSpec { stick_bottom: false })
+        .on_scroll_offset(move |p: rune::ScrollPos| scrolled.set(p.offset[1]))
         .scroll_margin(CARET_MARGIN)
         .child(col().key("content").w_full().center_y().child(surface))
 }
@@ -602,7 +622,7 @@ fn links(app: &App, geo: &Geo, kids: &mut Kids) {
     let mut keys = Vec::new();
     for g in geo.links(app.ed.doc(), &app.ed.reveal()) {
         // the destination as a tooltip (the web's `title`)
-        let to = app.ed.text().get(g.url.0..g.url.1).map(crate::links::dest).unwrap_or_default();
+        let to = crate::links::dest(&g.raw(app.ed.text()));
         for (k, r) in g.rects.iter().enumerate() {
             let key = format!("lk{}-{k}", g.from);
             let (ox, oy) = (PAD_L + r[0], PAD_T + r[1]);

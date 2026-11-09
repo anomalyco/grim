@@ -27,11 +27,14 @@ pub enum EditKind {
     Format,
     Toggle,
     Structure,
+    /// Move Item: its own undo step; undoing it puts the selection back where it was (rather than selecting
+    /// the text it re-inserts).
+    Move,
 }
 
 impl EditKind {
     pub fn is_separate(self) -> bool {
-        matches!(self, EditKind::Convert | EditKind::Paste | EditKind::Toggle | EditKind::Structure)
+        matches!(self, EditKind::Convert | EditKind::Paste | EditKind::Toggle | EditKind::Structure | EditKind::Move)
     }
 }
 
@@ -171,7 +174,63 @@ fn is_conversion(before: &Line, after: &Line) -> bool {
 
 pub fn paste(doc: &Doc, sel: Sel, s: &str) -> Edit {
     let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
-    replace_selection(doc, sel, &normalized, EditKind::Paste)
+    let mut e = replace_selection(doc, sel, &normalized, EditKind::Paste);
+    e.then = paste_url(doc, sel, &normalized).map(Box::new);
+    e
+}
+
+/// Pasting one full URL (`http(s)://…` or `mailto:…`, surrounding whitespace aside) makes a link, as a follow-up
+/// to the plain paste (`Edit::then`, so one undo gives the plain paste back): over a selection on one line,
+/// `[selection](url)`; else the URL alone, bare when it reads as an autolink literal right there
+/// (`parser::autolink_literal`), else `<url>`. Inside code, a link or an autolink: None (plain).
+fn paste_url(doc: &Doc, sel: Sel, s: &str) -> Option<Edit> {
+    let url = pasted_url(s)?;
+    let (a, b) = (sel.from(), sel.to());
+    // in a link's destination being written: `[a](|`
+    if [a, b].iter().any(|&p| in_code_or_link(doc, p)) || doc.text[..a].ends_with("](") {
+        return None;
+    }
+    let pasted = a + s.len();
+    let selected = &doc.text[a..b];
+    let mailto = url.len() >= 7 && url[..7].eq_ignore_ascii_case("mailto:");
+    if !selected.trim().is_empty() && !selected.contains(['\n', '[', ']']) {
+        let text = selected.trim();
+        let lead = &selected[..selected.len() - selected.trim_start().len()];
+        let trail = &selected[selected.trim_end().len()..];
+        // a destination with unbalanced parentheses goes in angle brackets
+        let balanced = url.matches('(').count() == url.matches(')').count();
+        let dest = if balanced { url.to_string() } else { format!("<{url}>") };
+        let link = format!("{lead}[{text}]({dest}){trail}");
+        return Some(edit(vec![Change::new(a, pasted, link.clone())], Sel::caret(a + link.len()), EditKind::Convert));
+    }
+    let bare = !mailto && {
+        let text = format!("{}{url}{}", &doc.text[..a], &doc.text[b..]);
+        let d = parse_doc(&text);
+        d.line_of(a).inline.iter().any(|e| e.ty == InlineType::Autolink && e.markers.is_empty() && e.from == a && e.to == a + url.len())
+    };
+    let ins = if bare { url.to_string() } else { format!("<{url}>") };
+    (ins != s).then(|| edit(vec![Change::new(a, pasted, ins.clone())], Sel::caret(a + ins.len()), EditKind::Convert))
+}
+
+/// The pasted text is one full URL: `http(s)://` and more, or `mailto:` and an address; no spaces or `<>` inside.
+fn pasted_url(s: &str) -> Option<&str> {
+    let url = s.trim();
+    let has = |p: &str| url.len() > p.len() && url.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes());
+    let ok = (has("https://") || has("http://") || (has("mailto:") && url.contains('@'))) && !url.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '<' | '>'));
+    ok.then_some(url)
+}
+
+/// `pos` is in a code block or inline code, or inside a link, image or autolink.
+fn in_code_or_link(doc: &Doc, pos: usize) -> bool {
+    let line = line_of(doc, pos);
+    if line.block_start.is_some() || matches!(line.ty, BlockType::Code | BlockType::Fence) {
+        return true;
+    }
+    line.inline.iter().any(|e| match e.ty {
+        InlineType::Code => e.content_from <= pos && pos <= e.content_to,
+        InlineType::Link | InlineType::Image | InlineType::Autolink => e.from < pos && pos < e.to,
+        _ => false,
+    })
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -395,6 +454,416 @@ pub fn delete_to_line_end(doc: &Doc, sel: Sel) -> Option<Edit> {
         return caret_delete(doc, pos.max(line.from), line.to, 1, false);
     }
     delete_range(pos, next_stop(doc, pos))
+}
+
+// -----------------------------------------------------------------------------------------------
+// Delete Item (Cmd-D)
+
+/// Cmd-D: delete the item at the caret, or every item the selection touches, as one undo step
+/// (`item_lines` says what an item is). When the item had a blank line on both sides (or the
+/// document's edge), one of them goes too. Numbered siblings after it that continued its numbering
+/// are renumbered. The caret goes to the start of the next item, or of the previous one when there's
+/// none after it (a list item: the next sibling at its level, else the previous one, else the next
+/// list line).
+pub fn delete_item(doc: &Doc, sel: Sel) -> Option<Edit> {
+    let lines = &doc.lines;
+    let n = lines.len();
+    let (first, last) = selected_lines(doc, sel);
+    let (mut a, mut b) = items_lines(doc, first, last);
+    let (item_a, item_b) = (a, b);
+    let blank = |li: usize| is_blank_line(doc, &lines[li]);
+    if !(a == b && blank(a)) && (a == 0 || blank(a - 1)) && (b + 1 == n || blank(b + 1)) && !(a == 0 && b + 1 == n) {
+        if b + 1 < n {
+            b += 1;
+        } else {
+            a -= 1;
+        }
+    }
+    let (from, to, has_next) = if b + 1 < n {
+        (lines[a].from, lines[b + 1].from, true)
+    } else if a > 0 {
+        (lines[a - 1].to, lines[b].to, false)
+    } else {
+        (0, doc.text.len(), false)
+    };
+    let mut changes = vec![Change::new(from, to, "")];
+    let top = &lines[item_a];
+    let level = top.indent;
+    let list = is_item(top.ty);
+    if top.ty == BlockType::Numbered {
+        let gone: Vec<&Line> = lines[item_a..=item_b].iter().filter(|l| l.ty == BlockType::Numbered && l.indent == level).collect();
+        let mut expect = gone.last().map_or(top.number, |l| l.number) + 1;
+        let mut number = top.number;
+        for l in &lines[item_b + 1..] {
+            if l.ty == BlockType::Numbered && l.indent == level {
+                if l.number != expect {
+                    break;
+                }
+                let Some((d0, d1)) = number_digits(doc, l) else { break };
+                if number != l.number {
+                    changes.push(Change::new(d0, d1, number.to_string()));
+                }
+                number += 1;
+                expect += 1;
+            } else if !((is_nested(l.ty) && l.indent > level) || is_continuation(doc, l)) {
+                break;
+            }
+        }
+    }
+    let new = parse_doc(&apply_changes(&doc.text, &changes));
+    let nl = &new.lines;
+    let next = has_next.then(|| line_at(nl, from));
+    let prev = match next {
+        Some(i) => i.checked_sub(1),
+        None if from == 0 => None,
+        None => Some(nl.len() - 1),
+    };
+    let start = |li: usize| nl[item_lines(&new, li).0].text_from;
+    let mut caret = None;
+    if list {
+        let same = |l: &Line| is_item(l.ty) && l.indent == level;
+        if let Some(i) = next.filter(|&i| same(&nl[i])) {
+            caret = Some(nl[i].text_from);
+        } else if let Some(mut p) = prev {
+            while p > 0 && ((is_nested(nl[p].ty) && nl[p].indent > level) || is_continuation(&new, &nl[p])) {
+                p -= 1;
+            }
+            if same(&nl[p]) {
+                caret = Some(nl[p].text_from);
+            }
+        }
+        if caret.is_none() {
+            caret = next.filter(|&i| is_item(nl[i].ty)).map(|i| nl[i].text_from);
+        }
+    }
+    let caret = caret
+        .or_else(|| next.and_then(|i| (i..nl.len()).find(|&j| !is_blank_line(&new, &nl[j]))).map(start))
+        .or_else(|| prev.and_then(|i| (0..=i).rev().find(|&j| !is_blank_line(&new, &nl[j]))).map(start))
+        .unwrap_or(from.min(new.text.len()));
+    Some(edit(changes, Sel::caret(caret), EditKind::Structure))
+}
+
+/// The lines (first, last) of the item line `li` is in: a list item (bullet, todo, numbered) with
+/// the paragraph lines continuing it and what's nested under it (items, quotes); a quote's
+/// run of `>` lines (with their continuations); a
+/// fenced code block with its fences; a table row (the header or delimiter row: the whole table); a
+/// heading or a rule alone; a paragraph's run of lines (a run right under a list item or a quote is
+/// that item's); a blank line alone.
+fn item_lines(doc: &Doc, li: usize) -> (usize, usize) {
+    let lines = &doc.lines;
+    let l = &lines[li];
+    match l.ty {
+        BlockType::Code | BlockType::Fence => (l.block_start.unwrap_or(li), l.block_end.unwrap_or(li)),
+        BlockType::TableHead | BlockType::TableDelim => l.table.as_ref().map_or((li, li), |t| (t.start, t.end)),
+        BlockType::TableRow | BlockType::Heading | BlockType::Hr => (li, li),
+        BlockType::Bullet | BlockType::Todo | BlockType::Numbered => {
+            let mut end = li;
+            while end + 1 < lines.len() && {
+                let m = &lines[end + 1];
+                is_nested(m.ty) && m.indent > l.indent || is_continuation(doc, m)
+            } {
+                end += 1;
+            }
+            (li, end)
+        }
+        BlockType::Quote => {
+            let mut start = li;
+            loop {
+                let mut k = start;
+                while k > 0 && is_continuation(doc, &lines[k - 1]) {
+                    k -= 1;
+                }
+                if k > 0 && lines[k - 1].ty == BlockType::Quote {
+                    start = k - 1;
+                } else {
+                    break;
+                }
+            }
+            let mut end = li;
+            while end + 1 < lines.len() && (lines[end + 1].ty == BlockType::Quote || is_continuation(doc, &lines[end + 1])) {
+                end += 1;
+            }
+            (start, end)
+        }
+        BlockType::Paragraph if is_blank_line(doc, l) => (li, li),
+        BlockType::Paragraph => {
+            let mut start = li;
+            while start > 0 && is_continuation(doc, &lines[start - 1]) {
+                start -= 1;
+            }
+            if start > 0 && (is_item(lines[start - 1].ty) || lines[start - 1].ty == BlockType::Quote) {
+                return item_lines(doc, start - 1);
+            }
+            let mut end = li;
+            while end + 1 < lines.len() && is_continuation(doc, &lines[end + 1]) {
+                end += 1;
+            }
+            (start, end)
+        }
+    }
+}
+
+/// The lines a selection touches (first, last); one ending at a line's start leaves that line out.
+fn selected_lines(doc: &Doc, sel: Sel) -> (usize, usize) {
+    let lines = &doc.lines;
+    let first = line_at(lines, sel.from());
+    let mut last = line_at(lines, sel.to());
+    if !sel.is_empty() && last > first && sel.to() == lines[last].from {
+        last -= 1;
+    }
+    (first, last)
+}
+
+/// The run of lines of every item lines `first..=last` are in (`item_lines`).
+fn items_lines(doc: &Doc, first: usize, last: usize) -> (usize, usize) {
+    (first..=last).map(|li| item_lines(doc, li)).fold((usize::MAX, 0), |(a, b), (x, y)| (a.min(x), b.max(y)))
+}
+
+/// A numbered item's digits (from, to).
+fn number_digits(doc: &Doc, l: &Line) -> Option<(usize, usize)> {
+    let tok = l.tokens.iter().find(|t| t.kind == TokenKind::Numbered)?;
+    let lead = doc.text[tok.from..tok.to].bytes().take_while(|&c| c == b' ').count();
+    let digits = doc.text[tok.from + lead..tok.to].bytes().take_while(u8::is_ascii_digit).count();
+    Some((tok.from + lead, tok.from + lead + digits))
+}
+
+// -----------------------------------------------------------------------------------------------
+// Move Item (Cmd-Option-Up / Down)
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MoveMode {
+    /// List items (with their sub-items), or a quote nested in one: among siblings at their level.
+    List,
+    /// Table body rows: among the body rows.
+    Row,
+    /// Top-level blocks (`block_lines`).
+    Block,
+}
+
+/// Cmd-Option-Up / Down (`dir` -1 / 1): swap the item at the caret, or the run of items the selection
+/// touches (`item_lines`), with the previous / next sibling, as one undo step. A list item (with its
+/// continuation lines and sub-items) swaps with its sibling at the same level in the same list, never
+/// leaving it (blank lines of a loose list are crossed); numbered siblings that were numbered in sequence
+/// keep it. A table body row swaps with the body row next to it (the header or delimiter row: the table
+/// moves as a block). Anything else (paragraph, heading, quote, code block, table) swaps
+/// with the top-level block next to it (a whole list is one); the blank lines between stay where they
+/// are. The selection stays on the moved text. None: nothing to swap with (a blank line, the first or
+/// last sibling), or a swap that would merge blocks.
+pub fn move_item(doc: &Doc, sel: Sel, dir: i32) -> Option<Edit> {
+    let lines = &doc.lines;
+    let n = lines.len();
+    let blank = |li: usize| is_blank_line(doc, &lines[li]);
+    let (mut first, mut last) = selected_lines(doc, sel);
+    while first < last && blank(first) {
+        first += 1;
+    }
+    while last > first && blank(last) {
+        last -= 1;
+    }
+    if blank(first) {
+        return None;
+    }
+    let row = |li: usize| lines[li].ty == BlockType::TableRow;
+    let table = |li: usize| lines[li].table.as_ref().map(|t| t.start);
+    let (mode, a, b) = if (first..=last).all(|k| row(k) && table(k) == table(first)) {
+        (MoveMode::Row, first, last)
+    } else {
+        let (a, b) = items_lines(doc, first, last);
+        let level = lines[a].indent;
+        let list = is_list_line(&lines[a])
+            && (a..=b).all(|k| {
+                let l = &lines[k];
+                is_blank_line(doc, l) || is_continuation(doc, l) || (is_list_line(l) && l.indent >= level)
+            });
+        if list {
+            (MoveMode::List, a, b)
+        } else {
+            let (a, b) = (first..=last).map(|li| block_lines(doc, li)).fold((usize::MAX, 0), |(a, b), (x, y)| (a.min(x), b.max(y)));
+            (MoveMode::Block, a, b)
+        }
+    };
+    let level = lines[a].indent;
+    let same_list = |l: &Line| {
+        is_list_line(l) && l.indent == level && (!is_item(l.ty) || !is_item(lines[a].ty) || (l.ty == BlockType::Numbered) == (lines[a].ty == BlockType::Numbered))
+    };
+    // the sibling (o0, o1) to swap with
+    let (o0, o1) = if dir < 0 {
+        if a == 0 {
+            return None;
+        }
+        let mut q = a - 1;
+        if mode != MoveMode::Row {
+            while q > 0 && blank(q) {
+                q -= 1;
+            }
+            if blank(q) {
+                return None;
+            }
+        }
+        match mode {
+            MoveMode::Row => (row(q) && table(q) == table(a)).then_some((q, q))?,
+            MoveMode::List => {
+                let mut p = q;
+                while p > 0 && !(is_list_line(&lines[p]) && lines[p].indent <= level) && (is_continuation(doc, &lines[p]) || is_list_line(&lines[p])) {
+                    p -= 1;
+                }
+                (same_list(&lines[p]) && item_lines(doc, p).1 == q).then_some((p, q))?
+            }
+            MoveMode::Block => {
+                let p = block_lines(doc, q);
+                (p.1 == q).then_some(p)?
+            }
+        }
+    } else {
+        let mut q = b + 1;
+        if mode != MoveMode::Row {
+            while q < n && blank(q) {
+                q += 1;
+            }
+        }
+        if q >= n {
+            return None;
+        }
+        match mode {
+            MoveMode::Row => (row(q) && table(q) == table(a)).then_some((q, q))?,
+            MoveMode::List => same_list(&lines[q]).then(|| item_lines(doc, q))?,
+            MoveMode::Block => {
+                let p = block_lines(doc, q);
+                (p.0 == q).then_some(p)?
+            }
+        }
+    };
+    // numbered siblings in sequence stay in sequence
+    let mut renum: Vec<(usize, u32)> = Vec::new();
+    if mode == MoveMode::List {
+        let ours: Vec<usize> = (a..=b).filter(|&k| is_item(lines[k].ty) && lines[k].indent == level).collect();
+        let order: Vec<usize> = if dir < 0 { std::iter::once(o0).chain(ours.iter().copied()).collect() } else { ours.iter().copied().chain(std::iter::once(o0)).collect() };
+        let start = lines[order[0]].number;
+        if order.iter().enumerate().all(|(i, &k)| lines[k].ty == BlockType::Numbered && lines[k].number == start + i as u32) {
+            let moved: Vec<usize> = if dir < 0 { ours.iter().copied().chain(std::iter::once(o0)).collect() } else { std::iter::once(o0).chain(ours.iter().copied()).collect() };
+            for (i, &k) in moved.iter().enumerate() {
+                if lines[k].number != start + i as u32 {
+                    renum.push((k, start + i as u32));
+                }
+            }
+        }
+    }
+    // the moved text, renumbered; `local` maps offsets in it
+    let (u0, u1) = (lines[a].from, lines[b].to);
+    let mut ours = String::new();
+    let mut local: Vec<(usize, usize, usize)> = Vec::new();
+    let mut at = u0;
+    for &(k, num) in renum.iter().filter(|(k, _)| (a..=b).contains(k)) {
+        let Some((d0, d1)) = number_digits(doc, &lines[k]) else { continue };
+        ours.push_str(&doc.text[at..d0]);
+        let s = num.to_string();
+        local.push((d0 - u0, d1 - d0, s.len()));
+        ours.push_str(&s);
+        at = d1;
+    }
+    ours.push_str(&doc.text[at..u1]);
+    // the sibling's own renumbering
+    let theirs = renum.iter().find(|(k, _)| *k == o0).and_then(|&(k, num)| number_digits(doc, &lines[k]).map(|(d0, d1)| Change::new(d0, d1, num.to_string())));
+    let their_len = lines[o1].to - lines[o0].from + theirs.as_ref().map_or(0, |c| c.insert.len()) - theirs.as_ref().map_or(0, |c| c.to - c.from);
+    let sep_raw = if dir < 0 { &doc.text[lines[o1].to..u0] } else { &doc.text[u1..lines[o0].from] };
+    let try_sep = |sep: &str| -> Option<Edit> {
+        let mut changes = Vec::new();
+        let new_from;
+        let their_from;
+        if dir < 0 {
+            changes.push(Change::new(lines[o1].to, u1, ""));
+            let ins = format!("{ours}{sep}");
+            match theirs.clone() {
+                // the sibling's number starts where the moved text goes: one change
+                Some(c) if c.from == lines[o0].from => changes.push(Change::new(c.from, c.to, format!("{ins}{}", c.insert))),
+                c => {
+                    changes.extend(c);
+                    changes.push(Change::new(lines[o0].from, lines[o0].from, ins));
+                }
+            }
+            new_from = lines[o0].from;
+            their_from = new_from + ours.len() + sep.len();
+        } else {
+            changes.push(Change::new(u0, lines[o0].from, ""));
+            changes.extend(theirs.clone());
+            changes.push(Change::new(lines[o1].to, lines[o1].to, format!("{sep}{ours}")));
+            their_from = u0;
+            new_from = u0 + their_len + sep.len();
+        }
+        let map = |p: usize| {
+            let off = p.clamp(u0, u1 + 1) - u0;
+            let shift: isize = local.iter().filter(|&&(at, old, _)| at + old <= off).map(|&(_, old, new)| new as isize - old as isize).sum();
+            new_from + (off as isize + shift) as usize
+        };
+        let text = apply_changes(&doc.text, &changes);
+        let len = text.len();
+        let new_sel = Sel::new(map(sel.anchor).min(len), map(sel.head).min(len));
+        if mode != MoveMode::Row {
+            let new = parse_doc(&text);
+            let ext = |li: usize| if mode == MoveMode::List { item_lines(&new, li) } else { block_lines(&new, li) };
+            let whole = |from: usize, len: usize| {
+                let (x, y) = (line_at(&new.lines, from), line_at(&new.lines, from + len));
+                ext(x).0 == x && ext(y).1 == y
+            };
+            if !whole(new_from, ours.len()) || !whole(their_from, their_len) {
+                return None;
+            }
+        }
+        Some(edit(changes, new_sel, EditKind::Move))
+    };
+    try_sep(sep_raw).or_else(|| (mode == MoveMode::Block && sep_raw == "\n").then(|| try_sep("\n\n")).flatten())
+}
+
+/// The top-level block line `li` is in, as Move Item swaps them: a whole list (its items with their
+/// continuations and what's nested in them), a whole table, else the item (`item_lines`).
+fn block_lines(doc: &Doc, li: usize) -> (usize, usize) {
+    let lines = &doc.lines;
+    if let Some(t) = &lines[li].table {
+        return (t.start, t.end);
+    }
+    let (mut a, mut b) = item_lines(doc, li);
+    if !is_list_line(&lines[a]) {
+        return (a, b);
+    }
+    loop {
+        let mut k = a;
+        while k > 0 && is_continuation(doc, &lines[k - 1]) {
+            k -= 1;
+        }
+        if k > 0 && is_list_line(&lines[k - 1]) {
+            a = k - 1;
+        } else {
+            break;
+        }
+    }
+    while b + 1 < lines.len() && is_list_line(&lines[b + 1]) {
+        b = item_lines(doc, b + 1).1;
+    }
+    (a, b)
+}
+
+/// A line of a list: an item, or a quote nested in one.
+fn is_list_line(l: &Line) -> bool {
+    is_item(l.ty) || (is_nested(l.ty) && l.indent > 0)
+}
+
+/// A bullet, todo or numbered item.
+fn is_item(ty: BlockType) -> bool {
+    matches!(ty, BlockType::Bullet | BlockType::Todo | BlockType::Numbered)
+}
+
+/// A line that, indented deeper than a list item, is part of it: a nested item or quote.
+fn is_nested(ty: BlockType) -> bool {
+    is_item(ty) || ty == BlockType::Quote
+}
+
+/// A non-blank paragraph line (one that continues the block above it).
+fn is_continuation(doc: &Doc, l: &Line) -> bool {
+    l.ty == BlockType::Paragraph && !is_blank_line(doc, l)
+}
+
+fn is_blank_line(doc: &Doc, l: &Line) -> bool {
+    l.ty == BlockType::Paragraph && crate::text::is_blank(l.text(&doc.text))
 }
 
 // -----------------------------------------------------------------------------------------------

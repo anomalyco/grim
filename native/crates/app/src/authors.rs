@@ -1,13 +1,17 @@
 //! Line authors in the editor's left margin (remote notes), as the web's `editor-rs/authors.ts`: the room says
 //! who wrote each line (`{t:"blame"}`, collab's `Notice::Blame`); a small muted name at the editor pane's left
-//! edge, only where the author changes. Between messages the values follow the text (`collab::blame::attribute`):
-//! our own edits are ours at once, others' keep the line's previous author until the next message.
+//! edge, only where the author changes. Between messages the values follow the text
+//! (`collab::blame::attribute_with`): our own edits are ours at once, others' keep the line's previous author until
+//! the next message; an edit that brings back a line's exact text (undo, redo, typing it back) gives it back to
+//! whoever had that text (a `LineMemory` by author id, kept across messages), as the room does. Review mode
+//! (`review_mode`) tints the lines that differ from its baseline (`tints`): light green with a thin green bar.
 
 use std::collections::HashSet;
 
+use collab::blame::{LineHistory, LineMemory};
 use collab::{Blame, BlameAuthor};
 use editor_core::BlockType;
-use rune::{El, TextStyle, Tx, text};
+use rune::{El, TextStyle, Tx, el, text};
 use serde_json::Value;
 
 use crate::App;
@@ -22,6 +26,16 @@ const GAP: f32 = 12.0;
 pub const MIN_MARGIN: f32 = 24.0;
 /// `.mde-author`'s colour.
 const NAME_INK: &str = "#9a9aa1";
+
+/// `--mde-review-tint`: review mode's highlights; green, apart from the blue selection and the yellow/orange find
+/// matches and highlights.
+pub const REVIEW_TINT: &str = "#34a853";
+pub const REVIEW_TINT_ALPHA: f32 = 0.13;
+/// `--mde-review-bar`: the tint's bar at its left, 2 pt, the same green.
+pub const REVIEW_BAR_ALPHA: f32 = 0.6;
+const REVIEW_BAR_W: f32 = 2.0;
+/// The tint reaches this far left of the text column (the web's 8px), so the bar doesn't touch the text.
+const TINT_OUT: f32 = 8.0;
 
 /// `.mde-author .nm`: 500 11px, 0.01em.
 pub fn name_style() -> TextStyle {
@@ -38,13 +52,76 @@ pub struct LineAuthors {
     pub text: String,
     /// Our own index in `authors` (-1 until we're there).
     pub me: i32,
+    /// Who had the line texts our edits took away: values index `remembered` (by author, so they outlive messages).
+    pub memory: LineMemory,
+    pub remembered: Vec<BlameAuthor>,
+}
+
+/// `LineAuthors`' history on author ids (its values index `authors`, which each message replaces).
+struct ById<'a> {
+    authors: &'a mut Vec<BlameAuthor>,
+    memory: &'a mut LineMemory,
+    remembered: &'a mut Vec<BlameAuthor>,
+}
+
+impl LineHistory for ById<'_> {
+    fn remember(&mut self, text: &str, v: i32) {
+        let Some(a) = usize::try_from(v).ok().and_then(|i| self.authors.get(i)) else { return self.memory.remember(text, -1) };
+        let n = match self.remembered.iter().position(|r| r.id == a.id) {
+            Some(n) => n,
+            None => {
+                self.remembered.push(a.clone());
+                self.remembered.len() - 1
+            }
+        };
+        self.memory.remember(text, n as i32);
+    }
+
+    fn recall(&mut self, text: &str) -> Option<i32> {
+        let n = self.memory.recall(text)?;
+        let Some(a) = usize::try_from(n).ok().and_then(|n| self.remembered.get(n)) else { return Some(-1) };
+        Some(match self.authors.iter().position(|x| x.id == a.id) {
+            Some(i) => i as i32,
+            None => {
+                self.authors.push(a.clone());
+                self.authors.len() as i32 - 1
+            }
+        })
+    }
 }
 
 impl LineAuthors {
     /// A message arrived: it describes the server's text, which `text` (ours) may be ahead of.
     pub fn new(b: Blame, text: &str, me_id: &str) -> LineAuthors {
         let me = b.authors.iter().position(|a| a.id == me_id).map_or(-1, |i| i as i32);
-        LineAuthors { authors: b.authors, values: b.lines, text: text.to_string(), me }
+        LineAuthors { authors: b.authors, values: b.lines, text: text.to_string(), me, ..Default::default() }
+    }
+
+    /// A newer message for the same note: the line history carries over.
+    pub fn renewed(self, old: Option<LineAuthors>) -> LineAuthors {
+        match old {
+            Some(o) => LineAuthors { memory: o.memory, remembered: o.remembered, ..self },
+            None => self,
+        }
+    }
+
+    /// Who made most of the lines of the text that differ from `committed` (blank ones aside): the live edits'
+    /// author by the line authors, or None (no such lines, or none of them known).
+    pub fn live_author(&self, committed: &str) -> Option<&BlameAuthor> {
+        let changed = crate::review_mode::changed(committed, &self.text);
+        let mut counts: Vec<(i32, usize)> = Vec::new();
+        for (i, c) in changed.iter().enumerate() {
+            let v = self.values.get(i).copied().unwrap_or(-1);
+            if !*c || v < 0 || v as usize >= self.authors.len() {
+                continue;
+            }
+            match counts.iter_mut().find(|(x, _)| *x == v) {
+                Some(e) => e.1 += 1,
+                None => counts.push((v, 1)),
+            }
+        }
+        let best = counts.iter().fold(None::<(i32, usize)>, |b, &(v, n)| if b.is_none_or(|b| n > b.1) { Some((v, n)) } else { b })?;
+        self.authors.get(best.0 as usize)
     }
 
     /// The text became `next`: by us (`me`: our presence user, the lines become ours) or by someone else.
@@ -64,7 +141,9 @@ impl LineAuthors {
             }
             self.me
         });
-        self.values = collab::blame::attribute(&self.text, next, &self.values, who);
+        let mut history = ById { authors: &mut self.authors, memory: &mut self.memory, remembered: &mut self.remembered };
+        let h: Option<&mut dyn LineHistory> = if who.is_some() { Some(&mut history) } else { None };
+        self.values = collab::blame::attribute_with(&self.text, next, &self.values, who, h);
         self.text = next.to_string();
     }
 }
@@ -167,6 +246,44 @@ pub fn names(app: &App, geo: &Geo, pane_w: f32) -> Vec<(usize, String, f32, f32)
     out
 }
 
+/// Review mode's tints behind the lines it highlights (keys `tint:<first line>`, its bar `tint-bar:<first line>`):
+/// one per run of such lines, across the text column and `TINT_OUT` left of it, a 2 pt bar at its left, on the
+/// surface (a table's or code block's background covers it, as on the web). Drawn before the text, so the text and
+/// the selection are over it. Shown with the authors hidden too.
+pub fn tints(app: &App, geo: &Geo) -> Vec<El> {
+    let lit = app.review_lines();
+    if !lit.contains(&true) {
+        return Vec::new();
+    }
+    let t = app.ed.text();
+    let fill = c(REVIEW_TINT).alpha(REVIEW_TINT_ALPHA);
+    let bar = c(REVIEW_TINT).alpha(REVIEW_BAR_ALPHA);
+    let mut out = Vec::new();
+    let mut run: Option<(usize, f32, f32)> = None;
+    let flush = |run: &mut Option<(usize, f32, f32)>, out: &mut Vec<El>| {
+        if let Some((first, top, bottom)) = run.take() {
+            out.push(el().key(format!("tint:{first}")).absolute(PAD_L - TINT_OUT, PAD_T + top).size(layout::col_w() + TINT_OUT, bottom - top).fill(fill).radius(2.0));
+            out.push(el().key(format!("tint-bar:{first}")).absolute(PAD_L - TINT_OUT, PAD_T + top).size(REVIEW_BAR_W, bottom - top).fill(bar));
+        }
+    };
+    for (i, l) in geo.lines.iter().enumerate() {
+        let empty = t.get(l.view.from..l.view.to).is_none_or(|s| s.trim().is_empty());
+        if !l.drawn() || empty || !lit.get(l.view.index).copied().unwrap_or(false) {
+            flush(&mut run, &mut out);
+            continue;
+        }
+        match run.as_mut() {
+            Some(r) if (l.top - r.2).abs() < 1.0 => r.2 = l.top + l.h,
+            _ => {
+                flush(&mut run, &mut out);
+                run = Some((i, l.top, l.top + l.h));
+            }
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +319,21 @@ mod tests {
         assert_eq!(la.values, [0, 1]);
         la.follow("one?", Some(&me));
         assert_eq!(marks(&[false], &la.values), [-1]);
+    }
+
+    /// Undo (Ann's text back): Ann's again, also after a new message (the history carries over); the live
+    /// edits' author is whoever wrote most of the lines that differ from the committed text.
+    #[test]
+    fn undo_gives_a_line_back_and_live_authors() {
+        let ann = BlameAuthor { id: "u1".into(), name: "Ann".into(), kind: "human".into(), color: "#123456".into() };
+        let me = serde_json::json!({ "id": "me", "name": "Mac", "color": "#0090ff", "kind": "human" });
+        let mut la = LineAuthors::new(Blame { authors: vec![ann.clone()], lines: vec![0, 0] }, "one\ntwo", "me");
+        la.follow("one\ntwo!", Some(&me));
+        la = LineAuthors::new(Blame { lines: vec![0, 1], authors: vec![ann.clone(), BlameAuthor { id: "me".into(), name: "Mac".into(), kind: "human".into(), color: "#0090ff".into() }] }, "one\ntwo!", "me").renewed(Some(la));
+        la.follow("one\ntwo", Some(&me));
+        assert_eq!(la.values, [0, 0]);
+        assert!(la.live_author("one\ntwo").is_none());
+        la.follow("one\ntwo\nthree\nfour", Some(&me));
+        assert_eq!(la.live_author("one\ntwo").map(|a| a.name.as_str()), Some("Mac"));
     }
 }

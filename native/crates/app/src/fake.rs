@@ -53,11 +53,19 @@ pub struct FakeRest {
     pub workspaces: Vec<FakeWs>,
     /// Every request: `METHOD path body`.
     pub log: Vec<String>,
+    /// A note history of its own (newest first): each commit (the history API's JSON) with the note's text at it,
+    /// which `file?ref=<sha>` answers; None: the canned three versions.
+    pub history: Option<Vec<(Value, String)>>,
     next: u32,
 }
 
 fn ok(v: Value) -> (u16, String) {
     (200, v.to_string())
+}
+
+/// A query parameter of `path`, decoded.
+fn query(path: &str, name: &str) -> Option<String> {
+    path.split_once('?')?.1.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == name).map(|(_, v)| net::dec(v)))
 }
 
 fn err(status: u16, msg: &str) -> (u16, String) {
@@ -162,6 +170,14 @@ impl FakeRest {
                     }
                     ("GET", ["tree"]) => ok(json!({ "head": "abc", "files": w.files })),
                     // a note's history: three versions, two hours, a day and six days ago
+                    ("GET", ["history"]) if self.history.is_some() => ok(Value::Array(self.history.iter().flatten().map(|(c, _)| c.clone()).collect())),
+                    ("GET", ["file"]) if self.history.is_some() && query(path, "ref").is_some() => {
+                        let sha = query(path, "ref").unwrap_or_default();
+                        match self.history.iter().flatten().find(|(c, _)| c["sha"] == sha.as_str()) {
+                            Some((_, t)) => ok(json!({ "content": t, "version": sha, "live": false })),
+                            None => err(404, "no such version"),
+                        }
+                    }
                     ("GET", ["history"]) => {
                         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
                         ok(json!([

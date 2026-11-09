@@ -38,17 +38,60 @@ pub fn file_menu() -> Vec<rune::MenuItem<App>> {
     items
 }
 
-/// The menu bar's items: the File menu, and View ▸ Show Authors (checked while the margin is on).
-pub fn menu_items(show_authors: bool) -> Vec<rune::MenuItem<App>> {
+/// The menu bar's items: the File menu, Edit ▸ Delete Item / Move Item Up / Move Item Down, Edit ▸ Review Mode
+/// (checked while it's on for the open note), View ▸ Show Authors (checked while the margin is on) and Go ▸ Back /
+/// Forward.
+pub fn menu_items(show_authors: bool, review: bool, back: bool, forward: bool) -> Vec<rune::MenuItem<App>> {
     let mut items = file_menu();
     items.push(rune::MenuItem::separator().menu("File"));
     items.push(rune::MenuItem::new("Connect to OpenCode… (Experimental)", menu_opencode).id("opencode").menu("File"));
     items.push(rune::MenuItem::separator().menu("Edit"));
+    items.push(rune::MenuItem::new("Delete Item", menu_delete_item).id("delete-item").menu("Edit").key_equivalent(DELETE_ITEM_KEY.parse().expect("the Delete Item shortcut")));
+    items.push(rune::MenuItem::new("Move Item Up", menu_move_item_up).id("move-item-up").menu("Edit").key_equivalent(MOVE_ITEM_UP_KEY.parse().expect("the Move Item Up shortcut")));
+    items.push(rune::MenuItem::new("Move Item Down", menu_move_item_down).id("move-item-down").menu("Edit").key_equivalent(MOVE_ITEM_DOWN_KEY.parse().expect("the Move Item Down shortcut")));
+    items.push(rune::MenuItem::separator().menu("Edit"));
     for &(id, title, key, f) in FIND_MENU {
         items.push(rune::MenuItem::new(title, f).id(id).menu("Edit").key_equivalent(key.parse().expect("a Find shortcut")));
     }
+    items.push(rune::MenuItem::separator().menu("Edit"));
+    items.push(rune::MenuItem::new("Review Mode", menu_review).id("review-mode").menu("Edit").checked(review).key_equivalent(crate::review_mode::KEY.parse().expect("the Review Mode shortcut")));
     items.push(rune::MenuItem::new("Show Authors", menu_authors).id("show-authors").menu("View").checked(show_authors));
+    items.extend(crate::nav::go_menu(back, forward));
     items
+}
+
+/// Edit ▸ Delete Item: editor-core's Cmd-D (`rules::delete_item`).
+pub const DELETE_ITEM_KEY: &str = "cmd+d";
+
+/// Edit ▸ Delete Item (⌘D): the item at the caret, or the items the selection touches. The menu takes ⌘D before the
+/// view, so it hands the key to `on_key` as typed: the editor has it only when it has the keys (not while a field,
+/// the tree or a dialog does), and headless runs take the same path.
+fn menu_delete_item(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        let ev = rune::KeyEvent { key: rune::Key::Command('d'), mods: rune::Mods { cmd: true, ..Default::default() } };
+        crate::input::on_key(app, &ev, tx);
+    }
+}
+
+/// Edit ▸ Move Item Up / Down: editor-core's Cmd-Option-Up / Down (`rules::move_item`).
+pub const MOVE_ITEM_UP_KEY: &str = "alt+cmd+up";
+pub const MOVE_ITEM_DOWN_KEY: &str = "alt+cmd+down";
+
+/// Edit ▸ Move Item Up / Down (⌥⌘↑ / ⌥⌘↓): the item at the caret, or the items the selection touches, above the
+/// previous / below the next sibling. Handed to `on_key` as typed, as Delete Item is.
+fn menu_move_item_up(app: &mut App, tx: &mut Tx) {
+    menu_move_item(app, rune::Key::Up, tx);
+}
+
+fn menu_move_item_down(app: &mut App, tx: &mut Tx) {
+    menu_move_item(app, rune::Key::Down, tx);
+}
+
+fn menu_move_item(app: &mut App, key: rune::Key, tx: &mut Tx) {
+    if menu_ready(app) {
+        let ev = rune::KeyEvent { key, mods: rune::Mods { cmd: true, alt: true, ..Default::default() } };
+        crate::input::on_key(app, &ev, tx);
+    }
 }
 
 /// Edit ▸ Find… and its friends (`find`).
@@ -95,20 +138,31 @@ fn menu_opencode(app: &mut App, tx: &mut Tx) {
     }
 }
 
+/// Edit ▸ Review Mode (⌥⌘R): on or off for the open note (`review_mode`).
+fn menu_review(app: &mut App, tx: &mut Tx) {
+    if menu_ready(app) {
+        app.toggle_review(tx);
+    }
+}
+
 fn menu_authors(app: &mut App, tx: &mut Tx) {
     app.toggle_authors(tx);
 }
 
 impl App {
-    /// The menu bar again when what it shows changed (Show Authors' check).
+    /// The menu bar again when what it shows changed (Show Authors' check, Back and Forward enabled).
     pub fn refresh_menu(&mut self) {
         let on = self.show_authors();
-        if on == self.store_menu_state {
+        let review = self.review_on();
+        let go = (self.nav.can_back(), self.nav.can_forward());
+        if on == self.store_menu_state && review == self.review_menu_state && go == self.nav.menu {
             return;
         }
         self.store_menu_state = on;
+        self.review_menu_state = review;
+        self.nav.menu = go;
         if let crate::remote::Backend::Net(crate::remote::Handle::Rune(h)) = &self.backend
-            && let Err(e) = h.set_menu(menu_items(on))
+            && let Err(e) = h.set_menu(menu_items(on, review, go.0, go.1))
         {
             eprintln!("grimoire: menu: {e}");
         }
@@ -456,6 +510,7 @@ impl App {
             }
         }
         self.git_change(Change::Rename { from: files::rel(&root, from), to: files::rel(&root, to) });
+        self.nav_renamed(&files::rel(&root, from), &files::rel(&root, to));
         let moved = |p: &Path| -> Option<PathBuf> { p.strip_prefix(from).ok().map(|rest| if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) }) };
         self.collapsed = self.collapsed.iter().map(|p| moved(p).unwrap_or_else(|| p.clone())).collect();
         self.store.move_folds(moved);

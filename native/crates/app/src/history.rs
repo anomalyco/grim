@@ -25,6 +25,8 @@ pub struct Commit {
     pub sha: String,
     pub message: String,
     pub author: String,
+    /// The author's email ("" when not known).
+    pub email: String,
     /// Milliseconds since the epoch.
     pub date: Option<i64>,
 }
@@ -42,10 +44,10 @@ impl Commit {
         Commit::from_json(v)
     }
 
-    /// The server's `{sha, message, authorName, date}` (`date`: an ISO string or milliseconds).
+    /// The server's `{sha, message, authorName, authorEmail, date}` (`date`: an ISO string or milliseconds).
     fn from_json(v: &Value) -> Option<Commit> {
         let date = v["date"].as_i64().or_else(|| v["date"].as_f64().map(|f| f as i64)).or_else(|| v["date"].as_str().and_then(parse_iso));
-        Some(Commit { sha: v["sha"].as_str()?.into(), message: v["message"].as_str().unwrap_or("").into(), author: v["authorName"].as_str().unwrap_or("").into(), date })
+        Some(Commit { sha: v["sha"].as_str()?.into(), message: v["message"].as_str().unwrap_or("").into(), author: v["authorName"].as_str().unwrap_or("").into(), email: v["authorEmail"].as_str().unwrap_or("").into(), date })
     }
 }
 
@@ -201,6 +203,12 @@ impl App {
         );
     }
 
+    /// Where review mode reads the open note's history: its job and the note's path (remote notes only).
+    pub(crate) fn review_job(&self) -> Option<(Job, String)> {
+        let t = self.history_target().ok().filter(|t| matches!(t.source, Source::Remote { .. }))?;
+        Some((self.history_job(&t), t.path))
+    }
+
     fn history_job(&self, t: &Target) -> Job {
         match &t.source {
             Source::Remote { api, id } => Job::Remote(self.history_api(api), id.clone()),
@@ -324,7 +332,7 @@ impl App {
 }
 
 /// Where a load runs (sent to a thread).
-enum Job {
+pub(crate) enum Job {
     Remote(Api, String),
     Git(PathBuf),
 }
@@ -334,17 +342,17 @@ fn api_err(e: ApiError) -> String {
 }
 
 impl Job {
-    fn history(&self, path: &str) -> Result<Vec<Commit>, String> {
+    pub(crate) fn history(&self, path: &str) -> Result<Vec<Commit>, String> {
         match self {
             Job::Remote(api, id) => api.history(id, path, 100).map_err(api_err),
             Job::Git(root) => {
-                let out = git(root, &["log", "-n", "100", "--format=%H%x1f%an%x1f%at%x1f%B%x1e", "--", path])?;
+                let out = git(root, &["log", "-n", "100", "--format=%H%x1f%an%x1f%ae%x1f%at%x1f%B%x1e", "--", path])?;
                 Ok(out
                     .split('\u{1e}')
                     .filter_map(|r| {
-                        let mut f = r.trim_start_matches('\n').splitn(4, '\u{1f}');
-                        let (sha, author, at, msg) = (f.next()?, f.next()?, f.next()?, f.next().unwrap_or(""));
-                        (!sha.is_empty()).then(|| Commit { sha: sha.into(), author: author.into(), date: at.trim().parse::<i64>().ok().map(|s| s * 1000), message: msg.trim_end().into() })
+                        let mut f = r.trim_start_matches('\n').splitn(5, '\u{1f}');
+                        let (sha, author, email, at, msg) = (f.next()?, f.next()?, f.next()?, f.next()?, f.next().unwrap_or(""));
+                        (!sha.is_empty()).then(|| Commit { sha: sha.into(), author: author.into(), email: email.into(), date: at.trim().parse::<i64>().ok().map(|s| s * 1000), message: msg.trim_end().into() })
                     })
                     .collect())
             }
@@ -358,7 +366,7 @@ impl Job {
         }
     }
 
-    fn file(&self, sha: &str, path: &str) -> Result<String, String> {
+    pub(crate) fn file(&self, sha: &str, path: &str) -> Result<String, String> {
         match self {
             Job::Remote(api, id) => api.file_at(id, path, sha).map_err(api_err),
             Job::Git(root) => git(root, &["show", &format!("{sha}:./{path}")]),

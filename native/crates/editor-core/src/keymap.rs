@@ -106,6 +106,11 @@ pub enum Command {
     /// Cmd-Option-Shift-[ / ]: fold / unfold every heading.
     FoldAll,
     UnfoldAll,
+    /// Cmd-D: delete the item at the caret, or every item the selection touches (`rules::delete_item`).
+    DeleteItem,
+    /// Cmd-Option-Up / Down (dir -1 / 1): move the item at the caret, or the items the selection touches, above the
+    /// previous / below the next sibling (`rules::move_item`).
+    MoveItem { dir: i32 },
     /// Expand the link at the caret (`Editor::expand_link`, what its pencil does). Not bound to a
     /// key yet: a hook for a future binding.
     ExpandLink,
@@ -227,6 +232,7 @@ pub fn bindings() -> Vec<Binding> {
         b(K::Char('b'), Yes, No, Any, No, Run(C::ToggleFormat(FormatType::Bold)), "Cmd-B: bold"),
         b(K::Char('i'), Yes, No, Any, No, Run(C::ToggleFormat(FormatType::Italic)), "Cmd-I: italic"),
         b(K::Char('u'), Yes, No, Any, No, Run(C::ToggleFormat(FormatType::Underline)), "Cmd-U: underline (~x~)"),
+        b(K::Char('d'), Yes, No, No, No, Run(C::DeleteItem), "Cmd-D: delete the item at the caret (paragraph, list item with its sub-items, heading, quote, code block, table row)"),
         b(K::Char('\''), Yes, No, Any, No, Run(C::ToggleFold), "Cmd-': toggle folding"),
         b(K::Char('['), Yes, Yes, Any, No, Run(C::FoldAtCaret), "Cmd-Option-[: fold the section at the caret"),
         b(K::Char(']'), Yes, Yes, Any, No, Run(C::UnfoldAtCaret), "Cmd-Option-]: unfold the heading at the caret"),
@@ -242,6 +248,8 @@ pub fn bindings() -> Vec<Binding> {
         b(K::Right, No, No, Yes, Any, Unhandled, "Ctrl-Right: system"),
         b(K::Left, No, No, No, Any, Shifted(mv(-1, HUnit::Char)), "Left: one unit (Shift extends)"),
         b(K::Right, No, No, No, Any, Shifted(mv(1, HUnit::Char)), "Right: one unit (Shift extends)"),
+        b(K::Up, Yes, Yes, No, No, Run(C::MoveItem { dir: -1 }), "Cmd-Option-Up: move the item up (a list item with its sub-items among its siblings; a block above the previous one)"),
+        b(K::Down, Yes, Yes, No, No, Run(C::MoveItem { dir: 1 }), "Cmd-Option-Down: move the item down"),
         b(K::Up, Yes, Any, Any, Any, Shifted(mv(-1, HUnit::Doc)), "Cmd-Up: document start"),
         b(K::Down, Yes, Any, Any, Any, Shifted(mv(1, HUnit::Doc)), "Cmd-Down: document end"),
         b(K::Up, No, Yes, Any, Any, Shifted(|e| C::MoveParagraph { dir: -1, extend: e }), "Option-Up: line start / previous line"),

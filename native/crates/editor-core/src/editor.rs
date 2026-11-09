@@ -636,6 +636,19 @@ impl<S: TextStore> Editor<S> {
         self.kill_edit(e, true);
     }
 
+    /// Cmd-D: delete the item at the caret or the items the selection touches (`rules::delete_item`), one undo step.
+    pub fn delete_item(&mut self) {
+        let e = rules::delete_item(&self.doc, self.sel);
+        self.apply_edit(e);
+    }
+
+    /// Cmd-Option-Up / Down: move the item at the caret or the items the selection touches above the previous / below
+    /// the next sibling (`rules::move_item`, `dir` -1 / 1), one undo step; the selection stays on them.
+    pub fn move_item(&mut self, dir: i32) {
+        let e = rules::move_item(&self.doc, self.sel, dir);
+        self.apply_edit(e);
+    }
+
     /// Apply a deletion and put what it deleted into the kill buffer: added after (`forward`) or
     /// before what the previous kill took when nothing happened since, else in its place.
     fn kill_edit(&mut self, e: Option<Edit>, forward: bool) {
@@ -675,7 +688,9 @@ impl<S: TextStore> Editor<S> {
         if self.kill.is_empty() {
             return;
         }
-        let e = rules::paste(&self.doc, self.sel, &self.kill);
+        // as killed: a URL stays plain text (no link, unlike a paste)
+        let mut e = rules::paste(&self.doc, self.sel, &self.kill);
+        e.then = None;
         self.apply_edit(Some(e));
     }
 
@@ -825,7 +840,8 @@ impl<S: TextStore> Editor<S> {
         self.apply_edit(e);
     }
 
-    /// Paste plain text (raw markdown); its own undo step.
+    /// Paste plain text (raw markdown); its own undo step. One full URL becomes a link (`rules::paste`): a second
+    /// undo step after the plain paste.
     pub fn paste(&mut self, s: &str) {
         if s.is_empty() {
             return;
@@ -938,7 +954,7 @@ impl<S: TextStore> Editor<S> {
                 let ins = inserted.iter().filter(|r| r.0 < r.1).fold(None, |acc: Option<(usize, usize)>, r| {
                     Some(acc.map_or(*r, |a| (a.0.min(r.0), a.1.max(r.1))))
                 });
-                if let (true, Some((a, b))) = (undo && kind != EditKind::Convert, ins) {
+                if let (true, Some((a, b))) = (undo && !matches!(kind, EditKind::Convert | EditKind::Move), ins) {
                     // text re-inserted by undo is selected
                     self.set_sel(Sel::new(a, b), false);
                 } else if let Some(r) = restore {
@@ -1363,6 +1379,8 @@ impl<S: TextStore> Editor<S> {
             Command::DeleteWordForward => self.delete_word_forward(),
             Command::DeleteToLineStart => self.delete_to_line_start(),
             Command::DeleteToLineEnd => self.delete_to_line_end(),
+            Command::DeleteItem => self.delete_item(),
+            Command::MoveItem { dir } => self.move_item(dir),
             Command::ToggleFold => {
                 self.toggle_fold_at_caret();
             }

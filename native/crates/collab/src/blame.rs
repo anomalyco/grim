@@ -44,11 +44,55 @@ impl Blame {
     }
 }
 
+/// Who last had each line text an edit took away (the web's `LineHistory`): when an edit brings a line's exact text
+/// back (undo, redo, typing or pasting it back), the line gets that author again instead of the editor.
+pub trait LineHistory {
+    fn remember(&mut self, text: &str, value: i32);
+    fn recall(&mut self, text: &str) -> Option<i32>;
+}
+
+/// How many removed line texts a `LineMemory` keeps, and the longest it keeps (the web's `MAX_HISTORY`, `MAX_HISTORY_TEXT`).
+pub const MAX_HISTORY: usize = 500;
+pub const MAX_HISTORY_TEXT: usize = 4000;
+
+/// The web's `LineMemory`: the newest `MAX_HISTORY` non-blank texts with their values, oldest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LineMemory {
+    entries: Vec<(String, i32)>,
+}
+
+impl LineHistory for LineMemory {
+    fn remember(&mut self, text: &str, value: i32) {
+        if text.trim().is_empty() || text.encode_utf16().count() > MAX_HISTORY_TEXT {
+            return;
+        }
+        self.entries.retain(|(t, _)| t != text);
+        self.entries.push((text.to_string(), value));
+        if self.entries.len() > MAX_HISTORY {
+            self.entries.remove(0);
+        }
+    }
+
+    fn recall(&mut self, text: &str) -> Option<i32> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        self.entries.iter().rev().find(|(t, _)| t == text).map(|(_, v)| *v)
+    }
+}
+
 /// The values after the text changed from `prev` to `next` (`values`: one per line of `prev`, split at "\n"):
 /// lines the change left as they were keep theirs, changed and new lines get `who` (`None`: each keeps the
 /// value of the old line at its place in the change). Only the lines between the change's first and last
 /// differing byte are diffed (by line).
 pub fn attribute(prev: &str, next: &str, values: &[i32], who: Option<i32>) -> Vec<i32> {
+    attribute_with(prev, next, values, who, None)
+}
+
+/// `attribute` with a `history` (and a `who`): the lines the change took away are remembered with their values, and
+/// a changed or new line whose exact text the history knows gets the remembered value instead of `who` (the web's
+/// `attribute(…, history)`).
+pub fn attribute_with(prev: &str, next: &str, values: &[i32], who: Option<i32>, history: Option<&mut dyn LineHistory>) -> Vec<i32> {
     if prev == next {
         return values.to_vec();
     }
@@ -69,8 +113,24 @@ pub fn attribute(prev: &str, next: &str, values: &[i32], who: Option<i32>) -> Ve
     let new_lines: Vec<&[u8]> = nb[from..line_end(nb, nb.len() - s)].split(|&c| c == b'\n').collect();
     let old = |i: usize| values.get(first + i).copied().unwrap_or(-1);
     let mut mid: Vec<i32> = (0..new_lines.len()).map(|i| who.unwrap_or_else(|| old(i.min(old_lines.len() - 1)))).collect();
-    for (a, b) in line_pairs(&old_lines, &new_lines, 2000) {
+    let pairs = line_pairs(&old_lines, &new_lines, 2000);
+    for &(a, b) in &pairs {
         mid[b] = old(a);
+    }
+    if let (Some(h), Some(_)) = (history, who) {
+        let line = |l: &[u8]| std::str::from_utf8(l).unwrap_or_default().to_string();
+        for (a, l) in old_lines.iter().enumerate() {
+            if !pairs.iter().any(|p| p.0 == a) {
+                h.remember(&line(l), old(a));
+            }
+        }
+        for (b, l) in new_lines.iter().enumerate() {
+            if !pairs.iter().any(|p| p.1 == b)
+                && let Some(v) = h.recall(&line(l))
+            {
+                mid[b] = v;
+            }
+        }
     }
     let mut out = values[..first.min(values.len())].to_vec();
     out.extend(mid);
@@ -193,6 +253,30 @@ mod tests {
         assert_eq!(attribute("same", "same", &v, Some(9)), v);
         // unicode: the change's bytes never split a line wrongly
         assert_eq!(attribute("é\nü", "é\nüx", &[1, 2], Some(9)), [1, 9]);
+    }
+
+    /// The web's "attribute with a LineHistory" test, step for step.
+    #[test]
+    fn undo_and_typing_back_give_a_line_back() {
+        let mut h = LineMemory::default();
+        let (agent, me) = (0, 1);
+        let mut text = "title\nagent line\nend".to_string();
+        let mut v = vec![agent, agent, agent];
+        let mut edit = |next: &str, h: &mut LineMemory| {
+            v = attribute_with(&text, next, &v, Some(me), Some(h));
+            text = next.to_string();
+            v.clone()
+        };
+        assert_eq!(edit("title\nagent line, edited\nend", &mut h), [agent, me, agent]);
+        assert_eq!(edit("title\nagent line\nend", &mut h), [agent, agent, agent], "undo");
+        assert_eq!(edit("title\nagent line, edited\nend", &mut h), [agent, me, agent], "redo");
+        edit("title\nagent line, edite\nend", &mut h);
+        assert_eq!(edit("title\nagent lin\nend", &mut h), [agent, me, agent]);
+        assert_eq!(edit("title\nagent line\nend", &mut h), [agent, agent, agent], "typed back");
+        edit("title\nend", &mut h);
+        assert_eq!(edit("title\nagent line\nend", &mut h), [agent, agent, agent], "a deleted line put back");
+        assert_eq!(edit("title\n\nagent line\nend", &mut h), [agent, me, agent, agent], "blank lines aren't remembered");
+        assert_eq!(attribute_with("a\nb", "a\nbb", &[0, 1], None, Some(&mut h)), [0, 1], "KEEP doesn't use it");
     }
 
     #[test]

@@ -215,9 +215,9 @@ impl App {
 
 /// `.save-status`: muted 12.5 pt text; a warning (`.warn`) is ink 500 on the soft yellow (`--warn-soft` over the
 /// paper) with a 6 pt `--warn` dot, 4/9/4/8 padding, 6 pt corners.
-/// Grim Beta's marker (`variant::BETA`): an orange "BETA" pill, in the header and the sidebar's switcher.
-pub const BETA_W: f32 = 38.0;
-pub fn beta_badge(key: &str) -> El {
+/// Grim Beta's marker (`variant::BETA`): an orange "BETA" pill in the note header.
+const BETA_W: f32 = 38.0;
+fn beta_badge(key: &str) -> El {
     row()
         .key(key)
         .w(BETA_W)
@@ -327,8 +327,9 @@ fn gh_source(url: String, rel: &str) -> El {
 
 pub fn view(app: &App, w: f32) -> El {
     let mut r = row().key("doc-header").w(w).h(HEADER_H).pr(12.0).gap(12.0).center_y();
-    // the sidebar hidden: the web's burger brings it back
-    r = if wants_sidebar_button(app) { r.pl(12.0).child(burger()) } else { r.pl(24.0) };
+    // the sidebar hidden: the web's burger brings it back; then Back and Forward (‹ ›)
+    r = if wants_sidebar_button(app) { r.pl(12.0).child(burger()) } else { r.pl(16.0) };
+    r = r.child(crate::nav::buttons(app));
     // a workspace that can't load: the header is empty (the web's `showMissing` clears it)
     let problem = app.remote.as_ref().is_some_and(|x| x.problem.is_some());
     let notice = app.remote.as_ref().is_some_and(|x| x.notice.is_some());
@@ -390,7 +391,7 @@ pub fn view(app: &App, w: f32) -> El {
         }
         r = r.child(ps);
     }
-    r.child(crate::voice::ui::mic_button(app)).child(more_button(app.header_menu_open))
+    r.children(crate::review_mode::pill(app)).child(crate::voice::ui::mic_button(app)).child(more_button(app.header_menu_open))
 }
 
 #[cfg(test)]

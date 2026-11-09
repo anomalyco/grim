@@ -314,7 +314,7 @@ fn seg_span(seg: &SegView, ds: usize, de: usize, base: TextStyle, strikes: &mut 
                 sp.bg = Some(c(CODE_BG));
                 sp.bg_pad = 3.0;
             }
-            InlineType::Link => {
+            InlineType::Link | InlineType::Autolink => {
                 sp.color = Some(c(LINK));
                 sp.underline = Some(c(LINK).alpha(0.55));
             }
@@ -691,7 +691,7 @@ pub struct Geo {
     pub wide: Vec<Wide>,
 }
 
-/// A collapsed link on screen (`Geo::links`).
+/// A collapsed link on screen (`Geo::links`), or an autolink (a bare URL or `<url>`) the caret isn't in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkGeo {
     pub line: usize,
@@ -706,6 +706,17 @@ pub struct LinkGeo {
     pub pencil: Option<[f32; 4]>,
     /// It wraps just an image.
     pub image: bool,
+    /// An autolink: its text is its URL (`url`), no pencil.
+    pub auto: bool,
+}
+
+impl LinkGeo {
+    /// Where it goes, as a link's source (`links::resolve`): the URL as written, an autolink's as
+    /// `url::autolink_href` (`www.…` as https, `a@b.co` as mailto).
+    pub fn raw(&self, text: &str) -> String {
+        let raw = text.get(self.url.0..self.url.1).unwrap_or_default();
+        if self.auto { editor_core::url::autolink_href(raw) } else { raw.to_string() }
+    }
 }
 
 fn is_table(v: &LineView) -> bool {
@@ -1043,7 +1054,9 @@ impl Geo {
             let Some(line) = doc.lines.get(l.view.index) else { continue };
             let shown: &[usize] = reveal.get(&line.index).map_or(&[], |r| &r.els);
             for (k, el) in line.inline.iter().enumerate() {
-                let Some(url) = el.url.filter(|_| el.ty == InlineType::Link && !shown.contains(&k)) else { continue };
+                let auto = el.ty == InlineType::Autolink;
+                let url = if auto { Some((el.content_from, el.content_to)) } else { el.url.filter(|_| el.ty == InlineType::Link) };
+                let Some(url) = url.filter(|_| !shown.contains(&k)) else { continue };
                 let (a, b) = (el.content_from.max(l.view.from), el.content_to.min(l.view.to));
                 let image = l.images.iter().find(|i| i.from == el.content_from && i.to == el.content_to);
                 let mut rects = Vec::new();
@@ -1054,11 +1067,11 @@ impl Geo {
                         rects.extend(p.rects(a.max(p.from), b.min(p.to)).into_iter().filter(|r| r[2] > 0.5));
                     }
                 }
-                let pencil = l.pieces.iter().flat_map(|p| &p.pencils).find(|g| g.url == url).map(|g| g.rect);
+                let pencil = l.pieces.iter().flat_map(|p| &p.pencils).find(|g| !auto && g.url == url).map(|g| g.rect);
                 if rects.is_empty() && pencil.is_none() {
                     continue;
                 }
-                out.push(LinkGeo { line: l.view.index, from: el.from, text_end: el.content_to, url, rects, pencil, image: image.is_some() });
+                out.push(LinkGeo { line: l.view.index, from: el.from, text_end: el.content_to, url, rects, pencil, image: image.is_some(), auto });
             }
         }
         out

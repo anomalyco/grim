@@ -58,8 +58,11 @@ cp "packaging/$icon.icns" "$app/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$app/Contents/PkgInfo"
 plutil -lint "$plist" >/dev/null
 
-echo "==> codesign (ad-hoc)"
-codesign --force --deep -s - "$app"
+# GRIM_SIGN_IDENTITY: a code-signing identity to sign with instead of ad-hoc (docs/app.md "Grim Beta"): a stable
+# identity keeps macOS's microphone permission across rebuilds.
+sign_identity="${GRIM_SIGN_IDENTITY:--}"
+echo "==> codesign ($([[ "$sign_identity" == - ]] && echo ad-hoc || echo "$sign_identity"))"
+codesign --force --deep -s "$sign_identity" "$app"
 codesign --verify --deep "$app"
 
 # Make Finder/Launch Services pick up the document types and icon right away.

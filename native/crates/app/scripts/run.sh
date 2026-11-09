@@ -293,3 +293,29 @@ $B crates/app/tests/fixtures/find/find.md --script $S/find-menu.json --snap $O/2
 $B crates/app/tests/fixtures/find/find.md --script $S/find-live.json --snap $O/207-find-live.png --size 900x700 --at 2
 $B $S/long.md --script $S/find-scroll.json --snap $O/208-find-scroll.png --size 900x500 --at 2
 $B --remote-demo --script $S/find-remote.json --snap $O/209-find-remote.png --size 1100x700 --at 2.2
+# Back and forward (nav.rs): the header's ‹ › after A, B, C (Forward grey); ⌘[ twice (both on); a scroll put back.
+$B "$N" --script $S/nav-seq.json --snap $O/220-nav-header.png --size 1100x600 --at mark:abc
+$B "$N" --script $S/nav-seq.json --snap $O/221-nav-back.png --size 1100x600 --at mark:back2
+$B $S/long.md --script $S/nav-scroll.json --snap $O/222-nav-scroll.png --size 1100x700 --at mark:back
+# Delete Item (⌘D, Edit ▸ Delete Item): the caret in "2. Find a hotel" (two sub-items under it), then the menu: the item
+# and its sub-items gone, the rest renumbered 2 and 3, the caret at the start of "Pack light".
+D=crates/app/tests/fixtures/delete-item/Trip.md
+$B $D --script $S/delete-item.json --snap $O/271-delete-item-before.png --size 900x620 --at mark:before
+$B $D --script $S/delete-item.json --snap $O/272-delete-item-after.png --size 900x620 --at mark:after
+# A quote as agents write it: bare `>` lines between paragraphs (blank quote lines, no `>` shown)
+$B "crates/app/tests/fixtures/agent-quote/Agent quote.md" --snap $O/285-agent-quote.png --size 820x1020
+# Move Item (⌥⌘↑ / ⌥⌘↓, Edit ▸ Move Item Up / Down): the caret in "2. Find a hotel" (two sub-items under it); the menu
+# moves it with its sub-items above "Book the train" (renumbered 1 and 2); ⌥⌘↓ twice takes it below "Pack light"
+# (3); at "Back on Sunday." the menu swaps the paragraph with the quote, the blank lines staying put; ⌘Z puts it back.
+M=crates/app/tests/fixtures/move-item/Plan.md
+$B $M --script $S/move-item.json --snap $O/290-move-item-before.png --size 900x620 --at mark:before
+$B $M --script $S/move-item.json --snap $O/291-move-item-up.png --size 900x620 --at mark:up
+$B $M --script $S/move-item.json --snap $O/292-move-item-down.png --size 900x620 --at mark:down
+$B $M --script $S/move-item.json --snap $O/293-move-item-paragraph.png --size 900x620 --at mark:paragraph
+$B $M --script $S/move-item.json --snap $O/294-move-item-undo.png --size 900x620 --at mark:undo
+# Pasting a URL: bare where it reads as a link, [selection](url) over a selection; bare URLs and <url> as links
+$B --sample --scene paste-url --snap $O/286-paste-url.png --size 820x620
+# Review mode (the header's pill, Edit ▸ Review Mode, ⌥⌘R): Ada's latest batch (her live edit and her two commits,
+# back to our commit), tinted, the pill "Reviewing: Ada · 4 lines"; then Edit ▸ Review Mode: off, no tints.
+$B --remote-demo=review --snap $O/250-review-mode.png --size 1100x700
+$B --remote-demo=review --script $S/review-off.json --snap $O/252-review-off.png --size 1100x700 --at 0.8

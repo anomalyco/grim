@@ -10,7 +10,8 @@ pub const NAME: &str = if BETA { "Grim Beta" } else { "Grim" };
 /// The hosted server: the New dialog's default, sign-in from the account menu.
 pub const DEFAULT_SERVER: &str = if BETA { "https://staging.grimnotes.app/" } else { "https://grimnotes.app/" };
 
-/// The Keychain service of the app's items (app tokens, the OpenCode pairing, voice keys).
+/// The Keychain service of the app's items (app tokens, the OpenCode pairing, voice keys). Grim Beta keeps those in
+/// `secrets.json` instead (`workspaces::keychain`) and only reads this service for `--import-keychain-secrets`.
 pub const KEYCHAIN_SERVICE: &str = if BETA { "Grimoire Beta" } else { "Grimoire" };
 
 /// The folder name under `~/Library/Application Support` and `~/Library/Caches`.

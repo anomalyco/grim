@@ -59,6 +59,15 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 app.toggle_sidebar();
                 return app.handled(tx);
             }
+            // ⌘[ / ⌘]: Back and Forward (Go menu's; headless runs get them here)
+            '[' if !m.shift && !m.alt => {
+                app.go_back(tx);
+                return app.handled(tx);
+            }
+            ']' if !m.shift && !m.alt => {
+                app.go_forward(tx);
+                return app.handled(tx);
+            }
             // ⌘⇧E: the tree takes the keys, at its current row
             'e' | 'E' if m.shift && app.root.is_some() => {
                 app.focus_tree();
@@ -251,12 +260,15 @@ pub fn on_key(app: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
-/// The URL source of the link holding the caret (or touching it).
+/// The URL source of the link (or autolink) holding the caret (or touching it).
 fn link_at_caret(app: &App) -> Option<String> {
     let sel = app.ed.selection();
     let doc = app.ed.doc();
     let line = doc.line_of(sel.head);
-    let el = line.inline.iter().find(|e| e.ty == InlineType::Link && e.from <= sel.head && sel.head <= e.to)?;
+    let el = line.inline.iter().find(|e| matches!(e.ty, InlineType::Link | InlineType::Autolink) && e.from <= sel.head && sel.head <= e.to)?;
+    if el.ty == InlineType::Autolink {
+        return Some(editor_core::url::autolink_href(&doc.text[el.content_from..el.content_to]));
+    }
     let (a, b) = el.url?;
     Some(doc.text[a..b].to_string())
 }
@@ -373,7 +385,7 @@ pub fn surface_gesture(app: &mut App, d: &Gesture, tx: &mut Tx) {
                 && !(m.shift || m.cmd || m.ctrl || m.alt)
                 && let Some(g) = geo.link_at(app.ed.doc(), &app.ed.reveal(), d.x - PAD_L, d.y - PAD_T)
             {
-                let url = app.ed.text()[g.url.0..g.url.1].to_string();
+                let url = g.raw(app.ed.text());
                 app.link_press = Some(LinkPress { x: d.x, y: d.y, url, moved: false });
                 app.handled(tx);
                 return;

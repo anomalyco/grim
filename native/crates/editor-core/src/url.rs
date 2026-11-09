@@ -35,3 +35,16 @@ pub fn safe_url(href: &str) -> Option<String> {
         _ => None,
     }
 }
+
+/// Where an autolink (`InlineType::Autolink`, its content `raw`) goes: `www.…` as https, `a@b.co` as mailto,
+/// anything else as written.
+pub fn autolink_href(raw: &str) -> String {
+    let scheme = raw.find(':').is_some_and(|c| c >= 2 && raw[..c].bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-')));
+    if scheme {
+        raw.to_string()
+    } else if raw.contains('@') {
+        format!("mailto:{raw}")
+    } else {
+        format!("https://{raw}")
+    }
+}
