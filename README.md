@@ -1,5 +1,7 @@
 # Grim
 
+<a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-built-with-g-dark-20.svg"><img alt="Built with OpenCode" src="https://opencode.ai/brand/badges/opencode-built-with-g-light-20.svg" height="20" /></picture></a>
+
 **A multiplayer Markdown notebook for people and agents.**
 
 Grim is a place to write notes together. Open a note and start typing: everyone who has it open sees your words and your cursor as you write, and AI agents can join in too. Your notes are plain Markdown files, saved in Git, so nothing is locked in and every version is kept.
